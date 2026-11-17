@@ -35,7 +35,9 @@
 #include <windows.h>
 #else
 #include <unistd.h>
+#ifndef __PROSPERO__
 #include <SDL2/SDL.h>
+#endif
 #endif
 
 void gd_open(const char *path, u32 lba);
@@ -49,7 +51,10 @@ static char ini_path[1024], exe_dir[1024];
 
 static void find_exe_dir(void)
 {
-#ifdef _WIN32
+#ifdef __PROSPERO__
+	strcpy(exe_dir, "/app0");
+	return;
+#elif defined(_WIN32)
 	GetModuleFileNameA(0, exe_dir, sizeof(exe_dir));
 #else
 	const ssize_t n = readlink("/proc/self/exe", exe_dir, sizeof(exe_dir) - 1);
@@ -299,14 +304,26 @@ static int open_gdi(const char *gdi)
 	{
 		unsigned trackno, lba, type, size;
 		char name[512];
-		if (sscanf(line, "%u %u %u %u %511s", &trackno, &lba, &type, &size, name) == 5 && lba >= 45000 && type == 4 && size == 2352)
+		int name_offset = 0;
+		if (sscanf(line, "%u %u %u %u %n", &trackno, &lba, &type, &size, &name_offset) != 4 ||
+			!name_offset || lba < 45000 || type != 4 || size != 2352)
+			continue;
+		const char *filename = line + name_offset;
+		if (*filename == '"')
 		{
-			char path[1600];
-			snprintf(path, sizeof(path), "%s%s", dir, name);
-			gd_open(path, lba);
-			ok = 1;
-			break;
+			const char *end = strchr(++filename, '"');
+			if (!end || end == filename || (size_t)(end - filename) >= sizeof(name))
+				continue;
+			memcpy(name, filename, (size_t)(end - filename));
+			name[end - filename] = 0;
 		}
+		else if (sscanf(filename, "%511s", name) != 1)
+			continue;
+		char path[1600];
+		snprintf(path, sizeof(path), "%s%s", dir, name);
+		gd_open(path, lba);
+		ok = 1;
+		break;
 	}
 	fclose(f);
 	return ok;
@@ -354,7 +371,18 @@ static long load_boot_files(void)
 }
 
 /* ---- startup ---------------------------------------------------------------------------- */
-#ifdef _WIN32
+#if defined(__PROSPERO__)
+static int pick_disc(void)
+{
+	const char *disc = "/app0/Soulcalibur (USA).gdi";
+	FILE *file = fopen(disc, "rb");
+	if (!file)
+		m1_fatal("Cannot open the default PS5 disc: %s", disc);
+	fclose(file);
+	config_set("game", "disc", disc);
+	return 1;
+}
+#elif defined(_WIN32)
 #include <commdlg.h>
 /* the first start (or a disc dump that moved): Windows' file picker for the .gdi, remembered in
    voldorium.ini. Returns 0 when cancelled. */
