@@ -1,0 +1,271 @@
+--- a/port/m1/aica.c
++++ b/port/m1/aica.c
+@@ -28,7 +28,12 @@
+  */
+ #include "m1.h"
+ #include "arm7.h"
++#include "dsp-program.h"
++#ifdef __PROSPERO__
++#include <SDL3/SDL.h>
++#else
+ #include <SDL2/SDL.h>
++#endif
+ #include <math.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -38,13 +43,16 @@
+ 
+ u8 aica_ram[RAM_SIZE];
+ static u8 regs[0x10000];
++static Sc1DspProgramCache dsp_program = { .dirty = true };
++static int collect_audio_stats, collect_audio_timing;
++static double audio_counter_to_ms;
+ u32 arm_pc_hist[0x2000];	/* M1_ARMPROF */
+ 
+ void hw_ext_irq(int bit, int on);
+ extern int m1_resim;
+ 
+ static u16 rg(u32 off) { u16 v; memcpy(&v, regs + (off & 0xfffc), 2); return v; }
+-static void rs(u32 off, u16 v) { memcpy(regs + (off & 0xfffc), &v, 2); }
++static void rs(u32 off, u16 v) { sc1_dsp_program_store(&dsp_program, regs, off, v); }
+ 
+ enum
+ {
+@@ -453,7 +461,7 @@
+ 		*l += v * g * ((pan & 16) ? 1.0f : side);	/* DIPAN bit 4: the right side is attenuated */
+ 		*r += v * g * ((pan & 16) ? side : 1.0f);
+ 		extern double aica_stat[66];
+-		aica_stat[c] += (double)(v * g) * (double)(v * g);
++		if (collect_audio_stats) aica_stat[c] += (double)(v * g) * (double)(v * g);
+ 	}
+ 	/* advance */
+ 	k->frac += step;
+@@ -698,12 +706,45 @@
+ }
+ 
+ /* ---- output -------------------------------------------------------------------------------- */
++#ifdef __PROSPERO__
++static SDL_AudioStream *audio_stream;
++void sc1_audio_menu_pause(bool paused)
++{
++	static bool resume_after_menu;
++	if (!audio_stream) return;
++	if (paused) {
++		resume_after_menu = !SDL_AudioDevicePaused(SDL_GetAudioStreamDevice(audio_stream));
++		if (resume_after_menu && !SDL_PauseAudioStreamDevice(audio_stream)) {
++			fprintf(stderr, "AICA: menu pause failed: %s\n", SDL_GetError());
++			resume_after_menu = false;
++		}
++	} else if (resume_after_menu) {
++		if (!SDL_ResumeAudioStreamDevice(audio_stream))
++			fprintf(stderr, "AICA: menu resume failed: %s\n", SDL_GetError());
++		resume_after_menu = false;
++	}
++}
++#else
+ static SDL_AudioDeviceID dev;
++#endif
+ static FILE *wav;
+ static u32 wav_bytes;
+ static s16 block[2 * 1024];	/* 512-sample blocks (11.6 ms) */
+ static int nblock;
+ static u64 dropped, underruns;
++#ifdef __PROSPERO__
++/* Snapshot only: queue depth is software queued bytes, not hardware-consumed audio. */
++static u64 sc1_audio_submitted_frames, sc1_audio_dropped_blocks;
++void sc1_audio_rtt_snapshot(uint64_t sequence, const char *phase)
++{
++    const int queued = audio_stream ? SDL_GetAudioStreamQueued(audio_stream) : -1;
++    fprintf(stderr, "SC1 RTT audio: id=%llu phase=%s time_ns=%llu guest_sample=%llu queued_frames=%d submitted_frames=%llu dropped_frames=%llu dropped_blocks=%llu underruns=%llu\n",
++        (unsigned long long)sequence, phase, (unsigned long long)SDL_GetTicksNS(),
++        (unsigned long long)clk.samples, queued < 0 ? -1 : queued / (int)(2 * sizeof(s16)),
++        (unsigned long long)sc1_audio_submitted_frames, (unsigned long long)dropped,
++        (unsigned long long)sc1_audio_dropped_blocks, (unsigned long long)underruns);
++}
++#endif
+ 
+ static void wav_header(void)
+ {
+@@ -734,15 +775,31 @@
+ 	if (done)
+ 		return;
+ 	done = 1;
++	collect_audio_stats = getenv("M1_AICASTAT") != NULL;
++	collect_audio_timing = getenv("M1_PERF") != NULL;
++	if (collect_audio_timing) {
++		const u64 frequency = SDL_GetPerformanceFrequency();
++		if (frequency) audio_counter_to_ms = 1000.0 / (double)frequency;
++		else collect_audio_timing = 0;
++	}
+ 	const char *w = getenv("M1_WAV");
+ 	const char *record_name(const char *path);	/* render.c: name-1.wav when name.wav exists */
+ 	if (w && (wav = fopen(record_name(w), "wb")))
+ 		wav_header();
+ 	if (getenv("M1_HEADLESS") || getenv("M1_NOSOUND"))
+ 		return;
++#ifdef __PROSPERO__
++	if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
++		fprintf(stderr, "AICA: no audio (%s)\n", SDL_GetError());
++		return;
++	}
++	const SDL_AudioSpec want = { .format = SDL_AUDIO_S16, .channels = 2, .freq = 44100 };
++	audio_stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &want, NULL, NULL);
++	fprintf(stderr, "AICA: audio %s\n", audio_stream ? "stream opened" : SDL_GetError());
++#else
+ 	if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0)
+ 	{
+-		printf("AICA: no audio (%s)\n", SDL_GetError());
++		fprintf(stderr, "AICA: no audio (%s)\n", SDL_GetError());
+ 		return;
+ 	}
+ 	SDL_AudioSpec want = { 0 }, have;
+@@ -752,6 +809,7 @@
+ 	want.samples = 512;
+ 	dev = SDL_OpenAudioDevice(0, 0, &want, &have, 0);
+ 	printf("AICA: audio %s\n", dev ? "on" : SDL_GetError());
++#endif
+ }
+ 
+ static void flush_block(void)
+@@ -765,6 +823,61 @@
+ 		if ((wav_bytes & 0xfffff) < (u32)nblock * 4)
+ 			wav_header();
+ 	}
++#ifdef __PROSPERO__
++	if (audio_stream) {
++		enum { bytes_per_frame = 2 * sizeof(s16), max_queued = 4410 * bytes_per_frame,
++		       resume_at = 2048 * bytes_per_frame };
++		static int playing;
++		static int reported_error;
++		static u64 last_reported_drop;
++		static unsigned pressure_reports;
++		const int bytes = nblock * bytes_per_frame;
++		int queued = SDL_GetAudioStreamQueued(audio_stream);
++		int ok = queued >= 0;
++		if (queued == 0 && playing) {
++			ok = SDL_PauseAudioStreamDevice(audio_stream);
++			if (ok) {
++				underruns++;
++				playing = 0;
++				if (underruns <= 4)
++					fprintf(stderr, "AICA: underrun %llu at guest sample %llu time_ns=%llu\n",
++					        (unsigned long long)underruns, (unsigned long long)clk.samples, (unsigned long long)SDL_GetTicksNS());
++			}
++		}
++		if (ok && queued <= max_queued - bytes) {
++			ok = SDL_PutAudioStreamData(audio_stream, block, bytes);
++			if (ok) {
++				queued += bytes;
++				sc1_audio_submitted_frames += (u64)nblock;
++			}
++			else
++				dropped += (u64)nblock, sc1_audio_dropped_blocks++;
++		} else {
++			dropped += (u64)nblock;
++			sc1_audio_dropped_blocks++;
++		}
++		if (sc1_audio_dropped_blocks != last_reported_drop && pressure_reports < 16 &&
++		    (sc1_audio_dropped_blocks <= 4 || (sc1_audio_dropped_blocks & (sc1_audio_dropped_blocks - 1)) == 0)) {
++			fprintf(stderr, "AICA: queue pressure blocks=%llu dropped_frames=%llu submitted_frames=%llu queued_frames=%d guest_sample=%llu time_ns=%llu\n",
++			        (unsigned long long)sc1_audio_dropped_blocks, (unsigned long long)dropped,
++			        (unsigned long long)sc1_audio_submitted_frames, queued < 0 ? -1 : queued / bytes_per_frame,
++			        (unsigned long long)clk.samples, (unsigned long long)SDL_GetTicksNS());
++			pressure_reports++;
++			last_reported_drop = sc1_audio_dropped_blocks;
++		}
++		if (ok && !playing && queued >= resume_at) {
++			ok = SDL_ResumeAudioStreamDevice(audio_stream);
++			playing = ok;
++			if (ok && underruns <= 4)
++				fprintf(stderr, "AICA: playback resumed with %d queued frames at guest sample %llu time_ns=%llu\n",
++				        queued / bytes_per_frame, (unsigned long long)clk.samples, (unsigned long long)SDL_GetTicksNS());
++		}
++		if (!ok && !reported_error) {
++			fprintf(stderr, "AICA: audio stream error (%s)\n", SDL_GetError());
++			reported_error = 1;
++		}
++	}
++#else
+ 	if (dev)
+ 	{
+ 		/* the game makes 735 samples per 60 Hz frame and the device plays 44,100 a second, so
+@@ -788,6 +901,7 @@
+ 			playing = 1;
+ 		}
+ 	}
++#endif
+ 	nblock = 0;
+ }
+ 
+@@ -807,10 +921,7 @@
+ 		off = getenv("M1_NODSP") != 0;
+ 	if (off)
+ 		return 0;
+-	for (u32 i = 0; i < 128 * 4; i++)
+-		if (rg(R_MPRO + 4 * i))
+-			return 1;
+-	return 0;
++	return sc1_dsp_program_active(&dsp_program, regs);
+ }
+ 
+ static s32 sx24(s32 v) { return (s32)((u32)v << 8) >> 8; }
+@@ -963,7 +1074,7 @@
+ 		const float side = (pan & 15) == 15 ? 0.0f : level_gain[15 - (pan & 15)];
+ 		*l += v * ((pan & 16) ? 1.0f : side);
+ 		*r += v * ((pan & 16) ? side : 1.0f);
+-		aica_stat[64] += (double)v * v;
++		if (collect_audio_stats) aica_stat[64] += (double)v * v;
+ 	}
+ }
+ 
+@@ -997,6 +1108,16 @@
+ 	volume_pct = next;
+ }
+ 
++void sc1_audio_set_volume(int value)
++{
++	value = value < 0 ? 0 : value > 200 ? 200 : value;
++	char text[16];
++	snprintf(text, sizeof(text), "%d", value);
++	config_set("audio", "volume", text);
++	setenv("M1_VOLUME", text, 1);
++	volume_pct = value;
++}
++
+ static void sample(void)
+ {
+ 	static int per_sample = -1;	/* M1_ARMRATE: ARM instructions per output sample */
+@@ -1036,7 +1157,7 @@
+ 	l *= mv;
+ 	r *= mv;
+ 	clk.samples++;
+-	aica_stat[65] += 1;
++	if (collect_audio_stats) aica_stat[65] += 1;
+ 	{
+ 		/* M1_AICADUMP=n: list the playing channels at output sample n */
+ 		static long long want = -2;
+@@ -1073,13 +1194,14 @@
+ 	clk.acc += n * 441u;	/* 44,100 / 200,000,000 = 441 / 2,000,000 */
+ 	if (clk.acc < 2000000u)
+ 		return;
+-	const u64 t0 = SDL_GetPerformanceCounter();
++	const u64 t0 = collect_audio_timing ? SDL_GetPerformanceCounter() : 0;
+ 	while (clk.acc >= 2000000u)
+ 	{
+ 		clk.acc -= 2000000u;
+ 		sample();
+ 	}
+-	aica_ms += (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / (double)SDL_GetPerformanceFrequency();
++	if (collect_audio_timing)
++		aica_ms += (double)(SDL_GetPerformanceCounter() - t0) * audio_counter_to_ms;
+ }
+ 
+ void aica_init(void)
+@@ -1150,6 +1272,7 @@
+ {
+ 	memcpy(aica_ram, p, RAM_SIZE), p += RAM_SIZE;
+ 	memcpy(regs, p, sizeof(regs)), p += sizeof(regs);
++	sc1_dsp_program_restored(&dsp_program);
+ 	memcpy(ch, p, sizeof(ch)), p += sizeof(ch);
+ 	memcpy(&clk, p, sizeof(clk)), p += sizeof(clk);
+ 	memcpy(&arm, p, sizeof(arm)), p += sizeof(arm);

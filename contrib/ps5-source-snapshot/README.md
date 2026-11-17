@@ -1,0 +1,5 @@
+# PS5 runtime source snapshot
+
+This is a source-only development snapshot of the PS5 menu, input, rendering, texture-piece and timing integration. `aica.patch` applies to `port/m1/aica.c` at Voldorium commit b889faa5da2cbf6a390e7b37faf9db0c5fb828c3. The other files are captured from the same combined runtime development work. They are not wired into this public tree as a complete PS5 build: referenced integration headers, shaders, graphics dependencies and the player-generated game module must be supplied through a separately reviewed integration. No game code, disc data, images or compiled binaries are included. Preserve the project and third-party terms in the root README. In particular, the root project describes its own code as personal, non-commercial use with a legally owned copy; game-derived translated modules must not be distributed.
+
+This snapshot was compiled in a private combined-link probe; this export has not been independently built or tested on a PS5. It does not establish gameplay, audio, texture, or performance behavior.
