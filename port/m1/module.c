@@ -4,7 +4,9 @@
  * M1_GAME: the module's path (default: sc_game.dll, on Linux sc_game.so, next to the executable).
  * M1_BUILD_YES=1 (tests): build a missing module without asking. */
 #include "m1.h"
-#ifdef _WIN32
+#if defined(SC_STATIC_GAME)
+extern const Sh4Module *sc_game_attach(const Sh4Host *host);
+#elif defined(_WIN32)
 #include <windows.h>
 #else
 #include <dlfcn.h>
@@ -30,11 +32,16 @@ static Sh4Host host = {
 	sh4_hook, sh4_loop_poll, sh4_pref, sh4_unimpl,
 };
 static const Sh4Module *mod;
+#ifndef SC_STATIC_GAME
 static char mod_path[1024];
+#endif
 
 /* the module's path: M1_GAME, else sc_game.dll next to the executable */
 const char *module_path(void)
 {
+#ifdef SC_STATIC_GAME
+	return "linked game module";
+#else
 	if (mod_path[0])
 		return mod_path;
 	const char *e = getenv("M1_GAME");
@@ -54,6 +61,7 @@ const char *module_path(void)
 #endif
 	}
 	return mod_path;
+#endif
 }
 
 /* the translated functions (sorted by address), 0 with *why set when the module is missing,
@@ -64,7 +72,9 @@ const Sh4Module *module_load(const char **why)
 		return mod;
 	typedef const Sh4Module *(*attach_fn)(const Sh4Host *);
 	attach_fn attach;
-#ifdef _WIN32
+#if defined(SC_STATIC_GAME)
+	attach = sc_game_attach;
+#elif defined(_WIN32)
 	HMODULE h = LoadLibraryA(module_path());
 	if (!h)
 		return *why = "not found", (const Sh4Module *)0;
@@ -88,11 +98,13 @@ const Sh4Module *module_load(const char **why)
 			*why = "built for another version of Voldorium", mod = 0;
 #endif
 	}
+#ifndef SC_STATIC_GAME
 	if (!mod)	/* let go of it: the builder replaces the file */
 #ifdef _WIN32
 		FreeLibrary(h);
 #else
 		dlclose(h);
+#endif
 #endif
 	return mod;
 }
@@ -103,7 +115,10 @@ const Sh4Module *module_load(const char **why)
    agrees to the downloads. 1: built (load it again), 0: not built, or no builder here */
 int module_build(const char *gdi)
 {
-#ifdef _WIN32
+#if defined(SC_STATIC_GAME)
+	(void)gdi;
+	return 0;
+#elif defined(_WIN32)
 	char dir[1024], bat[1100], cmd[3400];
 	GetModuleFileNameA(0, dir, sizeof(dir) - 32);
 	char *slash = strrchr(dir, 92);	/* backslash */

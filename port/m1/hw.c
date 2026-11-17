@@ -37,6 +37,10 @@
 #define CYC_FRAME 3333333u	/* 200 MHz / 60 Hz */
 #define CYC_CALL 100
 #define CYC_HW 200
+#ifdef SC_PS5_STARTUP_DIAGNOSTIC
+extern int sceKernelDebugOutText(int channel, const char *text);
+#endif
+
 #define CYC_SQ 2
 
 static u8 vram[VRAM_SIZE], sq[64];
@@ -711,7 +715,16 @@ void sh4_hw_write(u32 a, u32 v, int size)
 	if (p == 0x005f8014)	/* STARTRENDER: draw the frame; the render is reported done at once */
 	{
 		renders++;
+#ifdef SC_PS5_STARTUP_DIAGNOSTIC
+		TaCtx *ctx = ta_render_ctx();
+		if (ctx && ctx->np && ctx->nv)
+		{
+			sceKernelDebugOutText(0, "[Soul Calibur] diagnostic PASS: populated PVR submission\n");
+			m1_stop("diagnostic PASS: populated PVR submission");
+		}
+#else
 		render_frame(ta_render_ctx());
+#endif
 		hw_raise(0);
 		hw_raise(1);
 		hw_raise(2);

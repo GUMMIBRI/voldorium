@@ -444,9 +444,48 @@ int main(int argc, char **argv)
 }
 #endif
 
+#ifdef __PROSPERO__
+#include <fcntl.h>
+
+extern int sceKernelDebugOutText(int channel, const char *text);
+
+static FILE *ps5_run_log;
+
+static void ps5_start_log(void)
+{
+	sceKernelDebugOutText(0, "[Soul Calibur] runtime entered\n");
+	const int fd = open("/app0/soul-calibur.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+	if (fd < 0)
+	{
+		sceKernelDebugOutText(0, "[Soul Calibur] could not open app log\n");
+		return;
+	}
+	FILE *log = fdopen(fd, "a");
+	if (!log)
+	{
+		close(fd);
+		sceKernelDebugOutText(0, "[Soul Calibur] could not open log stream\n");
+		return;
+	}
+	setvbuf(log, NULL, _IONBF, 0);
+	ps5_run_log = log;
+	stdout = log;
+	stderr = log;
+	fputs("\n=== Soul Calibur startup ===\n", log);
+}
+#define PS5_STAGE(text) do { \
+	sceKernelDebugOutText(0, "[Soul Calibur] " text "\n"); \
+	if (ps5_run_log) fputs(text "\n", ps5_run_log); \
+} while (0)
+#else
+#define PS5_STAGE(text) ((void)0)
+#endif
+
 static int m1_main(int argc, char **argv)
 {
-#ifdef _WIN32
+#if defined(__PROSPERO__)
+	ps5_start_log();
+#elif defined(_WIN32)
 	const HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
 	if (!out || out == INVALID_HANDLE_VALUE || GetFileType(out) == FILE_TYPE_UNKNOWN)
 	{
@@ -475,8 +514,17 @@ static int m1_main(int argc, char **argv)
 		}
 	}
 #endif
+#ifndef __PROSPERO__
 	setvbuf(stdout, 0, getenv("M1_NET") ? _IONBF : _IOLBF, 0);	/* netplay: two instances, see progress as it happens */
+#endif
+	PS5_STAGE("allocating guest RAM");
 	sh4_ram = calloc(1, 16 << 20);	/* before the module: it keeps this address */
+	if (!sh4_ram)
+	{
+		PS5_STAGE("guest RAM allocation failed");
+		m1_stop("guest RAM allocation failed");
+		return 1;
+	}
 	{
 		extern void ta_tag_config(void);
 		ta_tag_config();
@@ -492,12 +540,14 @@ static int m1_main(int argc, char **argv)
 	/* settings, command line and the boot files from the disc dump (config.c) */
 	int config_start(int argc, char **argv, const char **ranges);
 	const char *ranges;
+	PS5_STAGE("opening disc and loading configuration");
 	const int limit = config_start(argc, argv, &ranges);
 	{
 		/* the game's code: the module built from the player's disc (module.c) */
 		const char *module_path(void);
 		const Sh4Module *module_load(const char **why);
 		const char *why = "";
+		PS5_STAGE("attaching recompiled game");
 		const Sh4Module *m = module_load(&why);
 		int module_build(const char *gdi);
 		const char *config_disc_path(void);
@@ -514,9 +564,11 @@ static int m1_main(int argc, char **argv)
 		sh4_nfns = m->nfns;
 		m->fsca_init();
 	}
+	PS5_STAGE("initializing game state");
 	state_init(ranges);
 	{
 		void aica_init(void);
+		PS5_STAGE("initializing audio");
 		aica_init();
 	}
 	printf("M1: %d translated entry points\n", sh4_nfns);
@@ -535,6 +587,7 @@ static int m1_main(int argc, char **argv)
 	start_thread(hang_thread, 0);	/* a frozen game says where in the log */
 	if (limit > 0)	/* development runs: stop after the time limit */
 		start_thread(watchdog_thread, (void *)(size_t)limit);
+	PS5_STAGE("entering recompiled game");
 	sh4_call(&c, 0x8c010000);
 	m1_stop("start returned");
 	return 0;
