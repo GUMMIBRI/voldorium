@@ -53,12 +53,14 @@ void online_menu(SH4 *c, void (*f)(SH4 *));
 #define ONLINE_INDEX 2		/* ONLINE VERSUS's place in the main menu (after VS BATTLE) */
 #define MUSEUM_INDEX 7		/* MUSEUM's place after the move (was 6) */
 #define GRAPHICS_INDEX 11	/* GRAPHICS: after OPTIONS (10); MISSION BATTLE moves to 12 */
-#define MAIN_COUNT 13
+#define EXIT_INDEX 13		/* EXIT GAME: the last entry */
+#define MAIN_COUNT 14
+#define V_EXIT 0x5f		/* its value (the game's own go up to 0x13) */
 #define ID_POOL 14			/* the Museum's entry ids 14-19 serve the lobby's lines */
 #define POOL_N 6
 #define ID_BACK 21			/* TO MAIN MENU */
 /* values of the lobby's action entries (the game's own go up to 0x13) */
-enum { V_PEER = 0x40, V_CANCEL = 0x48, V_ACCEPT, V_DECLINE, V_STATUS, V_G_DISPLAY = 0x50, V_G_RES, V_G_AA, V_G_VSYNC, V_G_LOADING, V_G_HUD, V_G_BG, V_G_TEXT, V_G_VOLUME, V_G_MORE, V_G_FIRST };	/* V_STATUS: a status line (selecting it does nothing; a disabled line would show "Not available in this version.") */
+enum { V_PEER = 0x40, V_CANCEL = 0x48, V_ACCEPT, V_DECLINE, V_STATUS, V_L_UPDATE, V_G_DISPLAY = 0x50, V_G_RES, V_G_AA, V_G_VSYNC, V_G_LOADING, V_G_HUD, V_G_BG, V_G_TEXT, V_G_VOLUME, V_G_MORE, V_G_UPDATE, V_G_FIRST };	/* V_STATUS: a status line (selecting it does nothing; a disabled line would show "Not available in this version.") */
 
 static void put32(u32 a, u32 v) { memcpy(&sh4_ram[a & 0xffffff], &v, 4); }
 static void put16(u32 a, u16 v) { memcpy(&sh4_ram[a & 0xffffff], &v, 2); }
@@ -71,14 +73,39 @@ static void put_str(u32 a, const char *s) { strcpy((char *)&sh4_ram[a & 0xffffff
 #define S_ITEMS (SCRATCH + 0x100)		/* lobby entries, 8 x 16 bytes */
 #define S_LINES (SCRATCH + 0x200)		/* lobby labels, 8 x 32 bytes */
 #define S_HELPS (SCRATCH + 0x400)		/* lobby help lines, 8 x 96 bytes */
-#define S_MAIN (SCRATCH + 0x800)		/* the main menu's entries, 13 x 16 bytes */
+#define S_MAIN (SCRATCH + 0x800)		/* the main menu's entries, 14 x 16 bytes */
 #define S_GLABEL (SCRATCH + 0x900)	/* "GRAPHICS" */
 #define S_GHELP (SCRATCH + 0x920)	/* its help line */
+#define S_ELABEL (SCRATCH + 0x980)	/* "EXIT GAME" */
+#define S_EHELP (SCRATCH + 0x9a0)	/* its help line */
 
 static void set_help(int id, u32 str)
 {
 	for (int k = 0; k < 4; k++)
 		put32(DESC + (u32)id * 0x30 + (u32)k * 4, str);
+}
+
+/* the newest release when it is newer than this one (the update check below), else "" */
+static char latest[16];
+const char *online_latest(void) { return latest; }
+
+/* the main menu's help lines for ONLINE VERSUS and GRAPHICS: at most 47 characters (text
+   reaching the screen's sides reads as a 4:3 picture, render.c) */
+static const char *online_help(void)
+{
+	static char t[64];
+	if (!latest[0])
+		return "Fight players around the world.";
+	snprintf(t, sizeof(t), "Fight players. Version %s is out: GRAPHICS.", latest);
+	return t;
+}
+static const char *graphics_help(void)
+{
+	static char t[64];
+	if (!latest[0])
+		return "Display, sound and other settings.";
+	snprintf(t, sizeof(t), "Settings. New version %s in MORE SETTINGS.", latest);
+	return t;
 }
 
 static int patched;
@@ -92,17 +119,19 @@ static void patch_main(void)
 {
 	patched = 1;
 	put_str(S_LABEL, "ONLINE VERSUS");
-	put_str(S_HELP, "Fight players around the world.");
+	put_str(S_HELP, online_help());
 	put_str(S_GLABEL, "GRAPHICS");
-	put_str(S_GHELP, "Display, sound and other settings.");
+	put_str(S_GHELP, graphics_help());
+	put_str(S_ELABEL, "EXIT GAME");
+	put_str(S_EHELP, "Quit Voldorium.");
 	set_help(ID_INTERNET, S_HELP);
 	/* the main menu rebuilt in scratch RAM: entry 10 (INTERNET) becomes ONLINE VERSUS at index 2,
-	   a copy of it GRAPHICS at index 11, both submenu entries like MUSEUM */
-	static const int order[MAIN_COUNT] = { 0, 1, 10, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+	   a copy of it GRAPHICS at index 11, both submenu entries like MUSEUM, and another EXIT GAME
+	   at the end, an action entry (the three share entry 10's help id) */
+	static const int order[MAIN_COUNT] = { 0, 1, 10, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 10 };
 	for (int i = 0; i < MAIN_COUNT; i++)
 		memcpy(&sh4_ram[(S_MAIN + (u32)i * 16) & 0xffffff], &sh4_ram[(MAIN_ITEMS + (u32)order[i] * 16) & 0xffffff], 16);
-	const u32 museum_colour = get32(MAIN_ITEMS + 6 * 16 + 8);
-	static const int ours[2] = { ONLINE_INDEX, GRAPHICS_INDEX };
+	const u32 museum_colour = get32(MAIN_ITEMS + 6 * 16 + 8);	static const int ours[2] = { ONLINE_INDEX, GRAPHICS_INDEX };
 	for (int k = 0; k < 2; k++)
 	{
 		const u32 it = S_MAIN + (u32)ours[k] * 16;
@@ -110,6 +139,12 @@ static void patch_main(void)
 		put16(it + 2, 1);	/* menu 1 (the borrowed Museum slot) */
 		put32(it + 8, museum_colour);
 		put32(it + 12, k ? S_GLABEL : S_LABEL);
+	}
+	{
+		const u32 it = S_MAIN + (u32)EXIT_INDEX * 16;
+		put16(it, 1);	/* an action: the menu returns V_EXIT when it is chosen (online_menu) */
+		put16(it + 2, V_EXIT);
+		put32(it + 12, S_ELABEL);
 	}
 	put32(MENUS, MAIN_COUNT);
 	put32(MENUS + 12, S_MAIN);
@@ -243,7 +278,7 @@ static void clean_name(char *dst, const char *src, size_t n)
 		snprintf(dst, n, "PLAYER");
 }
 
-static int sock_init(void)
+static int net_startup(void)
 {
 #ifdef _WIN32
 	static int wsa;
@@ -255,6 +290,39 @@ static int sock_init(void)
 		wsa = 1;
 	}
 #endif
+	return 1;
+}
+
+/* the lobby server: M1_LOBBY_SERVER, else [net] lobby, else the built-in one; 0: none or not found */
+static int lobby_server(struct sockaddr_in *out)
+{
+	const char *srv = getenv("M1_LOBBY_SERVER");
+	if (!srv || !*srv)
+		srv = config_get("net", "lobby");
+	if (!srv || !*srv)
+		srv = LOBBY_SERVER;
+	char host[128] = "";
+	unsigned port = 7100;
+	if (!strcmp(srv, "none") || sscanf(srv, "%127[^:]:%u", host, &port) < 1)
+		return 0;
+	struct addrinfo hints = { 0 }, *res = 0;
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_DGRAM;
+	if (getaddrinfo(host, 0, &hints, &res) || !res)
+	{
+		printf("online: lobby server %s not found\n", srv);
+		return 0;
+	}
+	*out = *(struct sockaddr_in *)res->ai_addr;
+	out->sin_port = htons((u16)port);
+	freeaddrinfo(res);
+	return 1;
+}
+
+static int sock_init(void)
+{
+	if (!net_startup())
+		return 0;
 	if (disc_sock == INVALID_SOCKET)
 	{
 		disc_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -298,31 +366,7 @@ static int sock_init(void)
 		clean_name(my_name, n && *n ? n : "PLAYER", 13);
 	}
 	if (!server_on)
-	{
-		/* the lobby server: M1_LOBBY_SERVER, else [net] lobby, else the built-in one */
-		const char *srv = getenv("M1_LOBBY_SERVER");
-		if (!srv || !*srv)
-			srv = config_get("net", "lobby");
-		if (!srv || !*srv)
-			srv = LOBBY_SERVER;
-		char host[128] = "";
-		unsigned port = 7100;
-		if (strcmp(srv, "none") && sscanf(srv, "%127[^:]:%u", host, &port) >= 1)
-		{
-			struct addrinfo hints = { 0 }, *res = 0;
-			hints.ai_family = AF_INET;
-			hints.ai_socktype = SOCK_DGRAM;
-			if (!getaddrinfo(host, 0, &hints, &res) && res)
-			{
-				server_addr = *(struct sockaddr_in *)res->ai_addr;
-				server_addr.sin_port = htons((u16)port);
-				server_on = 1;
-				freeaddrinfo(res);
-			}
-			else
-				printf("online: lobby server %s not found\n", srv);
-		}
-	}
+		server_on = lobby_server(&server_addr);
 	return disc_sock != INVALID_SOCKET && game_sock != INVALID_SOCKET;
 }
 
@@ -850,13 +894,15 @@ static void back_notice(u32 cur)
 	else if (shown && (get32(cur) != 0 || get32(cur + 4) != ONLINE_INDEX))
 	{
 		shown = 0;
-		put_str(S_HELP, "Fight players around the world.");
+		put_str(S_HELP, online_help());
 	}
 }
 
-/* one lobby line: label, help line, value (type 2: the menu to return to) */
+/* one lobby line: label, help line, value (type 2: the menu to return to), colour (ARGB) */
+#define WHITE 0xffffffffu
+#define GREEN 0xff20ff20u	/* the main menu's green (MUSEUM, ONLINE VERSUS, GRAPHICS) */
 static int nlines;
-static void line(const char *label, const char *help, int value, int type)
+static void line_coloured(const char *label, const char *help, int value, int type, u32 colour)
 {
 	const int k = nlines++;
 	const u32 it = S_ITEMS + (u32)k * 16, lab = S_LINES + (u32)k * 32, hl = S_HELPS + (u32)k * 96;
@@ -867,7 +913,7 @@ static void line(const char *label, const char *help, int value, int type)
 	put16(it, (u16)type);
 	put16(it + 2, (u16)value);
 	put16(it + 4, (u16)id);
-	put32(it + 8, 0xffffffffu);
+	put32(it + 8, colour);
 	put32(it + 12, lab);
 	if (type != 2)
 	{
@@ -875,6 +921,15 @@ static void line(const char *label, const char *help, int value, int type)
 		put16(AVAIL + (u32)id * 4 + 2, 1);
 		set_help(id, hl);
 	}
+}
+static void line(const char *label, const char *help, int value, int type) { line_coloured(label, help, value, type, WHITE); }
+
+/* a newer release (the update check): a green UPDATE TO line that opens the release page */
+static void update_line(int value)
+{
+	char u[32];
+	snprintf(u, sizeof(u), "UPDATE TO %s", latest);
+	line_coloured(u, "Opens the download page in your browser.", value, 1, GREEN);
 }
 
 static void build_lines(u32 cur)
@@ -887,7 +942,7 @@ static void build_lines(u32 cur)
 	case L_SEARCH:
 		if (!npeers)
 			line("SEARCHING...", noted ? note : "Looking for players around the world.", V_STATUS, 1);
-		for (int i = 0; i < npeers; i++)
+		for (int i = 0; i < npeers && i < POOL_N - (latest[0] != 0); i++)	/* room for the UPDATE line */
 		{
 			if (peers[i].ping >= 0)
 			{
@@ -902,6 +957,8 @@ static void build_lines(u32 cur)
 			}
 			line(l, noted ? note : t, V_PEER + i, 1);
 		}
+		if (latest[0])
+			update_line(V_L_UPDATE);	/* last: the cursor starts on the first line */
 		line("TO MAIN MENU", "", 0, 2);
 		break;
 	case L_CHALLENGING:
@@ -954,6 +1011,7 @@ static void build_lines(u32 cur)
 
 /* the GRAPHICS submenu: one line per setting, its current value as the label */
 void video_resolution_label(char *buf, size_t n);
+void video_resolution_help(char *buf, size_t n);
 int video_is_fullscreen(void);
 int video_msaa(void);
 void video_toggle_fullscreen(void);
@@ -971,6 +1029,8 @@ int video_text_sharp(void);
 void video_next_text(void);
 int audio_volume(void);
 void audio_next_volume(void);
+void video_open_url(const char *url);
+#define RELEASE_PAGE "https://github.com/enrique363/voldorium/releases/latest"
 
 /* two pages: the game's menu has room for six lines and TO MAIN MENU (ID_POOL, POOL_N) */
 static int gpage, gpage_moved;
@@ -981,28 +1041,32 @@ static void build_graphics(u32 cur)
 	char l[32];
 	if (gpage)
 	{
-		static const char *const bg[3] = { "BACKGROUNDS BLUR", "BACKGROUNDS REPLACE", "BACKGROUNDS STRETCH" };
+		static const char *const bg[4] = { "BACKGROUNDS BLUR", "BACKGROUNDS REPLACE", "BACKGROUNDS STRETCH", "BACKGROUNDS BLACK" };
 		line(loading_fast() ? "LOADING FAST" : "LOADING ORIGINAL", "Original: Dreamcast disc speed. Fast: instant.", V_G_LOADING, 1);
-		line(bg[video_backgrounds()], "4:3 menu pictures: stretched, or blurred sides.", V_G_BG, 1);
+		line(bg[video_backgrounds()], "4:3 pictures: stretched, blurred or black sides.", V_G_BG, 1);
 		line(video_text_sharp() ? "TEXT SHARP" : "TEXT SMOOTH", "Menu text: smooth edges, or original pixels.", V_G_TEXT, 1);
 		const int vol = audio_volume();
 		if (vol)
 			snprintf(l, sizeof(l), "VOLUME %d", vol);
 		line(vol ? l : "VOLUME OFF", "Sound volume. Select to change it.", V_G_VOLUME, 1);
+		if (latest[0])
+			update_line(V_G_UPDATE);
 		line("BACK", "Display, resolution, anti-aliasing, HUD.", V_G_FIRST, 1);
 	}
 	else
 	{
 	line(video_is_fullscreen() ? "FULL SCREEN" : "WINDOW", "Display: full screen or a window. Select to switch.", V_G_DISPLAY, 1);
 	video_resolution_label(l, sizeof(l));
-	line(l, "Resolution the game draws at. Select to change.", V_G_RES, 1);
+	char rh[96];
+	video_resolution_help(rh, sizeof(rh));
+	line(l, rh, V_G_RES, 1);
 	const int aa = video_msaa();
 	snprintf(l, sizeof(l), "ANTI-ALIASING %s", aa == 2 ? "2X" : aa == 4 ? "4X" : aa == 8 ? "8X" : "OFF");
 	line(l, "Smooths jagged edges. Select to change it.", V_G_AA, 1);
 	line(video_vsync() ? "VSYNC ON" : "VSYNC OFF", "On: no tearing. Off: lowest input delay.", V_G_VSYNC, 1);
 	static const char *const hud[3] = { "HUD EDGES", "HUD MIDDLE", "HUD 4:3" };
 	line(hud[video_hud()], "Fight HUD: at the edges, halfway, or as in 4:3."	/* no wider than the others: text reaching the screen's sides reads as a 4:3 picture (render.c) */, V_G_HUD, 1);
-	line("MORE SETTINGS", "Loading, backgrounds, text and volume.", V_G_MORE, 1);
+	line("MORE SETTINGS", latest[0] ? "Loading, backgrounds, text, volume, update." : "Loading, backgrounds, text and volume.", V_G_MORE, 1);
 	}
 	line("TO MAIN MENU", "", 0, 2);
 	for (int k = nlines; k < POOL_N; k++)
@@ -1035,6 +1099,8 @@ static void graphics_choose(int v)
 		video_next_text();
 	else if (v == V_G_VOLUME)
 		audio_next_volume();
+	else if (v == V_G_UPDATE)
+		video_open_url(RELEASE_PAGE);
 	else if (v == V_G_MORE || v == V_G_FIRST)
 	{
 		gpage = v == V_G_MORE;
@@ -1072,6 +1138,8 @@ static void lobby_choose(int v)
 			match_token[0] = 0;
 		}
 	}
+	else if (v == V_L_UPDATE)
+		video_open_url(RELEASE_PAGE);
 	else if (v == V_DECLINE && lstate == L_CHALLENGED)
 	{
 		say(&other, "DECLINE", "");
@@ -1127,6 +1195,95 @@ static void use_slot(int kind)
 			put32(AVAIL + (u32)(ID_POOL + k) * 4, museum_avail[k]);
 			set_help(ID_POOL + k, museum_help[k]);
 		}
+	}
+}
+
+/* the update check: at the first main menu, "VERSION x.y.z" to the lobby server from a socket of
+   its own (up to three times, a second apart, then 5 s for the answer); its "LATEST x.y.z", when
+   newer than this version, goes into the main menu's corner (render.c), the help lines and an
+   UPDATE line on GRAPHICS' second page. Nothing waits for it and nothing is shown without an
+   answer. Off with [game] update_check = 0 or [net] lobby = none, and in an online match.
+   M1_LATEST=x.y.z (tests): that answer, without asking. */
+static int version_newer(const char *v)
+{
+	int a[3], b[3];
+	if (sscanf(v, "%d.%d.%d", &a[0], &a[1], &a[2]) != 3 || sscanf(VOLDORIUM_VERSION, "%d.%d.%d", &b[0], &b[1], &b[2]) != 3)
+		return 0;
+	for (int i = 0; i < 3; i++)
+		if (a[i] != b[i])
+			return a[i] > b[i];
+	return 0;
+}
+
+static void set_latest(const char *v)
+{
+	if (strlen(v) >= sizeof(latest) || !version_newer(v))
+		return;
+	snprintf(latest, sizeof(latest), "%s", v);
+	printf("online: Voldorium %s is out (this is %s): %s\n", latest, VOLDORIUM_VERSION, RELEASE_PAGE);
+	put_str(S_HELP, online_help());
+	put_str(S_GHELP, graphics_help());
+}
+
+static void update_check(void)
+{
+	static int state;	/* 0 not started, 1 asking, 2 done */
+	static SOCKET s = INVALID_SOCKET;
+	static struct sockaddr_in srv;
+	static DWORD start, sent;
+	static int tries;
+	static u32 id;
+	if (state == 2)
+		return;
+	if (!state)
+	{
+		state = 2;
+		const char *fake = getenv("M1_LATEST");
+		if (fake && *fake)
+		{
+			set_latest(fake);
+			return;
+		}
+		const char *on = config_get("game", "update_check");
+		if ((on && !strcmp(on, "0")) || !net_startup() || !lobby_server(&srv))
+			return;
+		s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+		if (s == INVALID_SOCKET)
+			return;
+		set_nonblocking(s);
+		id = random_id();
+		start = GetTickCount();
+		state = 1;
+	}
+	const DWORD now = GetTickCount();
+	if (tries < 3 && (!tries || now - sent >= 1000))
+	{
+		char m[96];
+		const int n = snprintf(m, sizeof(m), "SCL1 %s %08x VERSION %s", SC_BUILD_ID, id, VOLDORIUM_VERSION);
+		sendto(s, m, n, 0, (const struct sockaddr *)&srv, sizeof(srv));
+		sent = now;
+		tries++;
+	}
+	int done = 0;
+	for (;;)
+	{
+		char m[128], v[16];
+		struct sockaddr_in from;
+		socklen_t fl = sizeof(from);
+		const int n = recvfrom(s, m, sizeof(m) - 1, 0, (struct sockaddr *)&from, &fl);
+		if (n <= 0)
+			break;
+		m[n] = 0;
+		if (from.sin_addr.s_addr == srv.sin_addr.s_addr && from.sin_port == srv.sin_port && sscanf(m, "SCL1 LATEST %15s", v) == 1)
+		{
+			set_latest(v);
+			done = 1;
+		}
+	}
+	if (done || now - start > 5000)
+	{
+		closesocket(s);
+		state = 2;
 	}
 }
 
@@ -1200,13 +1357,14 @@ void online_menu(SH4 *c, void (*f)(SH4 *))
 								   3600 frames without input): waiting in the lobby is not idling */
 	if (allowed)
 	{
+		update_check();
 		back_notice(cur);
 		if (get32(cur) == 0)
 		{
 			const u32 e = get32(cur + 4);
 			gpage = 0;	/* GRAPHICS opens on its first page */
 			use_slot(e == ONLINE_INDEX ? SLOT_LOBBY : e == GRAPHICS_INDEX ? SLOT_GRAPHICS : SLOT_MUSEUM);
-			set_help(ID_INTERNET, e == GRAPHICS_INDEX ? S_GHELP : S_HELP);	/* the two share an id */
+			set_help(ID_INTERNET, e == GRAPHICS_INDEX ? S_GHELP : e == EXIT_INDEX ? S_EHELP : S_HELP);	/* the three share an id */
 		}
 		const int open = get32(cur) == 1 && slot_is_lobby;
 		if (open && !lobby_open)
@@ -1230,7 +1388,9 @@ void online_menu(SH4 *c, void (*f)(SH4 *))
 	}
 	f(c);
 	const u32 v = c->r[0];
-	if (slot_is_lobby && v >= V_PEER && v <= V_STATUS)
+	if (v == V_EXIT && allowed)
+		m1_stop("quit (EXIT GAME)");	/* as closing the window */
+	if (slot_is_lobby && v >= V_PEER && v <= V_L_UPDATE)
 	{
 		put32(cur + 0x28, 0);	/* cancel the menu's leave-the-mode countdown */
 		c->r[0] = 0x12;
@@ -1241,5 +1401,21 @@ void online_menu(SH4 *c, void (*f)(SH4 *))
 		put32(cur + 0x28, 0);
 		c->r[0] = 0x12;
 		graphics_choose((int)v);
+	}
+	/* M1_TEST_UNLOCK=1 (tests): a second into the main menu, the unlock announcement
+	   (CONGRATULATIONS!, mode 52) for the character the flag 0x8c25dbfc bit 0 stands for, as the
+	   game shows it after an Arcade clear; then back to the main menu */
+	static int unlock_test = -1, unlock_calls;
+	if (unlock_test < 0)
+		unlock_test = getenv("M1_TEST_UNLOCK") != 0;
+	if (unlock_test && get32(cur) == 0 && ++unlock_calls == 60)
+	{
+		printf("online: unlock test\n");
+		put32(0x8c25dbfcu, get32(0x8c25dbfcu) | 1);
+		put32(0x8c24a590u, 14);	/* where the announcement returns to: the main menu */
+		const SH4 saved = *c;
+		c->r[4] = 0x34;
+		sh4_call(c, 0x8c0318a0u);	/* game_set_mode */
+		*c = saved;
 	}
 }

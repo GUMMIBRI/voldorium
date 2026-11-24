@@ -19,11 +19,14 @@ Controls: arrow keys = D-pad, Z = A, X = B, A = X, S = Y, Q / W = L / R triggers
 Enter = Start (change them in voldorium.ini, [keys], with SDL key names). Confirm with A (Z,
 or the controller's A button): Start (Enter) only works in the main menu; B (X) goes back. A
 game controller plays player 1 with the keyboard (left stick or D-pad; triggers or shoulder
-buttons for L / R); a second controller is player 2, for VS BATTLE. In the gallery's picture
+buttons for L / R); a second controller is player 2, for VS BATTLE. The shoulder buttons and
+triggers can press other buttons or several at once, e.g. A and B together: [pad] in
+voldorium.ini (see voldorium.ini below). In the gallery's picture
 viewer L / R change pictures (the D-pad moves the picture).
 The game starts full screen at your monitor's resolution. GRAPHICS in the main menu (under
 OPTIONS) switches between full screen and a window, sets the resolution the game is drawn at
-(native or a 16:9 size up to your monitor's), anti-aliasing (off, 2x, 4x, 8x), VSync (see
+(native, which also takes your monitor's shape from 4:3 to 16:9, such as 16:10; or a 16:9,
+16:10 or 4:3 size up to your monitor's; 4:3 shows the game as framed on the Dreamcast), anti-aliasing (off, 2x, 4x, 8x), VSync (see
 below) and the fight HUD (4:3, the default: life bars and names where the original 4:3 game has
 them; MIDDLE: halfway out; EDGES: at the sides of the 16:9 screen; only your own screen
 changes, also online). MORE SETTINGS, its second page, has loading (ORIGINAL: the disc loads as
@@ -31,7 +34,9 @@ fast as the Dreamcast's drive, as on the console; FAST: instantly, so the VS scr
 fight is cut short; online matches always load at the original speed), backgrounds and text
 (see 16:9 pictures below) and the sound volume (100, off, 25, 50, 75). Changes apply at once
 and are saved in voldorium.ini; every setting is listed under "voldorium.ini" below. Alt+Enter
-or F11: full screen on/off. Esc: quit (during an online match: leave it and go back to the main
+or F11: full screen on/off. F12: a screenshot (PNG, in the screenshots folder next to the
+game; Xbox Game Bar cannot capture the game's window). EXIT GAME (the last main menu entry)
+or Esc: quit (during an online match: leave it and go back to the main
 menu; if a match is cut off, both players return there).
 
 VSync
@@ -68,6 +73,9 @@ networks), or the lobby stays empty.
 Players on other networks (over the internet) appear in the same list, through the lobby
 server: still no ports to set. If your router blocks a direct connection, the match goes
 through the server's relay automatically.
+Online matches run without your memory card (both players must run exactly the same game), so
+both players get everything unlocked from the start, whatever their own saves hold: every
+character, stage, costume and extra mode. Nothing from an online match is saved to your card.
 
 Linux
 -----
@@ -87,7 +95,7 @@ Deck, start voldorium once in Desktop Mode (the first start builds the game; Ste
 comes with Python and kdialog, but this is not yet tested on a real Deck), then Steam > Games > Add a Non-Steam Game to My Library > voldorium. Windows: add
 Voldorium.exe the same way, and in its Properties > Compatibility force a recent Proton. Online
 Versus works between Deck, Linux and Windows players of the same version. The 1280x800 screen
-shows the game in 16:9 with thin bars above and below.
+shows the game in 16:10, filling it.
 
 Memory card
 -----------
@@ -132,6 +140,16 @@ Releases (or you built it yourself): Windows Security > Virus & threat protectio
 history, open the item, Actions > Allow on device. Reporting it to Microsoft as "Incorrectly
 detected" (microsoft.com/wdsi/filesubmission) helps clear it for everyone.
 
+Updates
+-------
+At the main menu the game asks the lobby server once whether a newer version is out (it sends
+only its version number). If one is, the lower right corner reads "ver. 1.1.6 (1.1.7 is out)"
+and ONLINE VERSUS and GRAPHICS > MORE SETTINGS have UPDATE TO 1.1.7 (in green), which opens the
+download page in your browser.
+Nothing is downloaded or installed for you: unpack the new version and copy voldorium.ini and
+vmu_a1.bin into it. [game] update_check = 0 turns the check off. Online Versus only matches
+players of the same version.
+
 voldorium.ini
 -------------
 The settings file next to the executable; a note above each line says what it does. The ones
@@ -140,17 +158,22 @@ marked * are also in the game (GRAPHICS). Edit it while the game is closed.
          font         the Dreamcast system font file (optional)
          loading *    original or fast (see above)
          vmu          the memory card file (default vmu_a1.bin next to the game)
+         update_check 1: say when a newer version is out (see Updates), 0: never ask
 [video]  fullscreen * 1 full screen, 0 a window
-         resolution * native, or a 16:9 size such as 1920x1080 (the size the game is drawn at)
+         resolution * native (your screen's size and shape), 77%, 67%, 59% or 50% of it (upscaled
+                      with AMD FSR 1), or a 16:9, 16:10 or 4:3 size such as 1920x1080
+         upscale      fsr (AMD FSR 1, default) or linear: how a smaller picture is enlarged
          window       the window's size when not full screen (default 1280x720)
          msaa *       anti-aliasing: 0, 2, 4 or 8
-         backgrounds * stretch, blur or replace (see 16:9 pictures)
+         backgrounds * stretch, blur, black or replace (see 16:9 pictures)
          hud *        4:3, middle or edges
          text *       smooth or sharp
          vsync *      1 on, 0 off (see VSync)
 [audio]  enabled      0: no sound at all
          volume *     percent, 0 to 200
 [keys]   up down left right a b x y start l r: keyboard keys, as SDL key names (see Controls)
+[pad]    lb rb lt rt  what the controller's shoulder buttons and triggers press: Dreamcast
+                      buttons a b x y l r start, joined with + for several (lt = a+b); default L, R
 [net]    name         your nickname in the Online Versus lobby
          port         UDP port for online play (default 7000)
          delay        fight input delay in frames online (default 2)

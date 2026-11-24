@@ -28,6 +28,7 @@
 #include <GL/gl.h>
 #include <GL/glext.h>
 #define GL_FUNCS(X) \
+	X(PFNGLACTIVETEXTUREPROC, glActiveTexture) \
 	X(PFNGLATTACHSHADERPROC, glAttachShader) \
 	X(PFNGLBINDBUFFERPROC, glBindBuffer) \
 	X(PFNGLBINDFRAMEBUFFERPROC, glBindFramebuffer) \
@@ -55,6 +56,7 @@
 	X(PFNGLSHADERSOURCEPROC, glShaderSource) \
 	X(PFNGLUNIFORM1FPROC, glUniform1f) \
 	X(PFNGLUNIFORM1IPROC, glUniform1i) \
+	X(PFNGLUNIFORM2IPROC, glUniform2i) \
 	X(PFNGLUNIFORM2FPROC, glUniform2f) \
 	X(PFNGLUNIFORM3FPROC, glUniform3f) \
 	X(PFNGLBUFFERSUBDATAPROC, glBufferSubData) \
@@ -64,6 +66,7 @@
 #define X(T, n) static T p_##n;
 GL_FUNCS(X)
 #undef X
+#define glActiveTexture p_glActiveTexture
 #define glAttachShader p_glAttachShader
 #define glBindBuffer p_glBindBuffer
 #define glBindFramebuffer p_glBindFramebuffer
@@ -88,6 +91,7 @@ GL_FUNCS(X)
 #define glShaderSource p_glShaderSource
 #define glUniform1f p_glUniform1f
 #define glUniform1i p_glUniform1i
+#define glUniform2i p_glUniform2i
 #define glUniform2f p_glUniform2f
 #define glUniform3f p_glUniform3f
 #define glUniform4f p_glUniform4f
@@ -113,6 +117,12 @@ static int gl_load(void) { return 1; }
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
+#include <sys/stat.h>
+#ifndef _WIN32
+#include <spawn.h>
+extern char **environ;
+#endif
 
 u32 hw_reg(u32 addr);
 unsigned tex_get(u32 tcw, u32 tsp);
@@ -124,7 +134,13 @@ static SDL_GLContext glc;
 static SDL_GameController *pads[2];	/* player 1 (with the keyboard), player 2 */
 static int enabled = -1;
 static GLuint prog, vao, vbo;
-static GLint u_tex, u_mode, u_flags, u_alpha_ref, u_target, u_xmap, u_umap, u_xoff, u_fog, u_fog_col, u_ymap;
+static GLint u_tex, u_mode, u_flags, u_alpha_ref, u_target, u_xmap, u_umap, u_xoff, u_fog, u_fog_col, u_ymap, u_xzoom;
+static GLint u_fog_col_ram, u_fog_density, u_fog_tab;
+static GLuint fog_tex;
+/* the picture's shape (width / height, 4:3 to 16:9) and its zoom: the game is simulated and drawn for
+   16:9 (Hor+, the same for every player, also online); a narrower picture shows its middle */
+static float view_aspect = 16.0f / 9, view_zoom = 1;
+static int player_shot;	/* F12 pressed: a screenshot after the next frame (player_screenshot) */
 /* viewport of the current target, for user tile clip scissors */
 static int vp_x, vp_y, vp_w, vp_h, tgt_w = 640, tgt_h = 480;
 static u32 buttons, buttons_b;	/* window input: player 1 (keyboard, first controller), player 2 */
@@ -145,11 +161,13 @@ static const char *vs_src =
 	"uniform vec2 umap;    // texture u' = umap.x + (u - umap.x) * umap.y\n"
 	"uniform float xoff;   // added after the x mapping (copies of tiled layers)\n"
 	"uniform vec2 ymap;	// y' = ymap.x + (y - ymap.x) * ymap.y (blur fill only)\n"
+	"uniform float xzoom;  // the picture's shape: 16:9 is 1, narrower shapes show less of the sides\n"
 	"void main() {\n"
 	"  v_bad = any(isinf(pos)) || any(isnan(pos)) ? 1.0 : 0.0;\n"
 	"  float iw = clamp(pos.z, 1e-7, 1e30);\n"
 	"  vec2 p = clamp(pos.xy, vec2(-1e30), vec2(1e30));\n"
 	"  float x = xmap.x + (p.x - xmap.x) * xmap.y + xoff;\n"
+	"  x = target.x * 0.5 + (x - target.x * 0.5) * xzoom;\n"
 	"  float y = ymap.x + (p.y - ymap.x) * ymap.y;\n"
 	"  gl_Position = vec4(x * 2.0 / target.x - 1.0, 1.0 - y * 2.0 / target.y, 0.0, 1.0);\n"
 	"  v_uvw = vec3(vec2(umap.x + (uv.x - umap.x) * umap.y, uv.y) * iw, iw);\n"
@@ -166,6 +184,18 @@ static const char *fs_src =
 	"uniform float alpha_ref; // PT_ALPHA_REF (0-255), < 0: no alpha test\n"
 	"uniform int fog;       // TSP fog mode: 1 = per vertex (offset alpha)\n"
 	"uniform vec3 fog_col;  // FOG_COL_VERT\n"
+	"uniform vec3 fog_col_ram; // FOG_COL_RAM (table fog)\n"
+	"uniform float fog_density; // FOG_DENSITY as a number\n"
+	"uniform sampler2D fog_tab; // FOG_TABLE: 128 x 2 (row 0 the low bytes, row 1 the high bytes)\n"
+	"// table fog (as the PowerVR, and Flycast): the index is a log scale of 1/w * FOG_DENSITY,\n"
+	"// 16 entries per power of two, interpolated between an entry's high and low byte\n"
+	"float fog_table(float iw) {\n"
+	"  float z = clamp(iw * fog_density, 1.0, 255.9999);\n"
+	"  float e = floor(log2(z));\n"
+	"  float m = z * 16.0 / exp2(e) - 16.0;\n"
+	"  float i = floor(m) + e * 16.0 + 0.5;\n"
+	"  return texture(fog_tab, vec2(i / 128.0, 0.75 - (m - floor(m)) / 2.0)).r;\n"
+	"}\n"
 	"out vec4 frag;\n"
 	"void main() {\n"
 	"  if (v_bad > 0.0) discard;  // the PowerVR cannot set such a triangle up and drops it\n"
@@ -185,6 +215,8 @@ static const char *fs_src =
 	"    if ((flags & 4) != 0) c.rgb += ofs.rgb;\n"
 	"  }\n"
 	"  if (fog == 1) c.rgb = mix(c.rgb, fog_col, ofs.a);\n"
+	"  else if (fog == 0) c.rgb = mix(c.rgb, fog_col_ram, fog_table(v_uvw.z));\n"
+	"  else if (fog == 3) c = vec4(fog_col_ram, fog_table(v_uvw.z));\n"
 	"  // the PowerVR compares 8-bit alphas: alpha 1.0 interpolated across a polygon comes out a\n"
 	"  // hair below 1.0 in floats and would fail PT_ALPHA_REF 255\n"
 	"  if (alpha_ref >= 0.0 && floor(c.a * 255.0 + 0.5) < alpha_ref) discard;\n"
@@ -228,6 +260,8 @@ static void parse_shots(void)
 static GLuint frame_fbo, frame_color, frame_depth, resolve_fbo, resolve_tex;
 static int frame_w, frame_h, frame_samples = -1;
 static int res_w, res_h, msaa, max_samples = 8;
+static int res_pct;	/* resolution = 77% ... 50%: that share of native, upscaled with FSR (0: native or WxH) */
+static const int fsr_pcts[] = { 77, 67, 59, 50 };	/* FSR 1's ultra quality, quality, balanced, performance */
 
 void config_set(const char *section, const char *key, const char *value);
 void config_save(void);
@@ -238,6 +272,9 @@ static void video_settings_load(void)
 	const char *r = getenv("M1_RESOLUTION");
 	if (r && sscanf(r, "%dx%d", &res_w, &res_h) != 2)
 		res_w = res_h = 0;
+	res_pct = r && strchr(r, '%') ? atoi(r) : 0;
+	if (res_pct < 25 || res_pct >= 100)
+		res_pct = 0;
 	msaa = getenv("M1_MSAA") ? atoi(getenv("M1_MSAA")) : 0;
 }
 
@@ -269,6 +306,231 @@ static void frame_target(int w, int h)
 	printf("video: drawing at %dx%d, %s\n", w, h, samples ? (samples == 2 ? "2x MSAA" : samples == 4 ? "4x MSAA" : "8x MSAA") : "no MSAA");
 }
 
+/* ---- FSR 1 upscaling ---------------------------------------------------------------------
+ * A picture drawn smaller than its area in the window (resolution 77% to 50% of native, or a
+ * fixed size below it) is upscaled with AMD FidelityFX Super Resolution 1: EASU (edge-adaptive
+ * upscale, 12 texels per pixel) into fsr_tex at the window's size, then RCAS (contrast-adaptive
+ * sharpening) into the window. Ported to GLSL 330 from AMD's ffx_fsr1.h (FSR 1.0, MIT licence:
+ * Copyright (c) 2021 Advanced Micro Devices, Inc.), the 32-bit float paths, without RCAS's
+ * optional noise removal. [video] upscale = linear (M1_UPSCALE) keeps plain bilinear scaling.
+ *
+ * FSR 1 licence: Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+ * and associated documentation files (the "Software"), to deal in the Software without
+ * restriction, including without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions: The above copyright
+ * notice and this permission notice shall be included in all copies or substantial portions of
+ * the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+ * PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+ * LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+ * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE. */
+static const char *fsr_vs =
+	"#version 330 core\n"
+	"layout(location = 0) in vec2 p;\n"
+	"void main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+static const char *easu_fs =
+	"#version 330 core\n"
+	"out vec4 o;\n"
+	"uniform sampler2D src; uniform vec2 origin, scale; uniform ivec2 isize;\n"
+	"vec3 T(ivec2 p) { return texelFetch(src, clamp(p, ivec2(0), isize - 1), 0).rgb; }\n"
+	"float L(vec3 c) { return c.b * 0.5 + (c.r * 0.5 + c.g); }\n"
+	"void Set(inout vec2 dir, inout float len, float w, float a, float b, float c, float d, float e) {\n"
+	"  float dc = d - c, cb = c - b;\n"
+	"  float lx = 1.0 / max(max(abs(dc), abs(cb)), 1e-8);\n"
+	"  float dx = d - b; dir.x += dx * w; lx = clamp(abs(dx) * lx, 0.0, 1.0); len += lx * lx * w;\n"
+	"  float ec = e - c, ca = c - a;\n"
+	"  float ly = 1.0 / max(max(abs(ec), abs(ca)), 1e-8);\n"
+	"  float dy = e - a; dir.y += dy * w; ly = clamp(abs(dy) * ly, 0.0, 1.0); len += ly * ly * w;\n"
+	"}\n"
+	"void Tap(inout vec3 ac, inout float aw, vec2 off, vec2 dir, vec2 len2, float lob, float clp, vec3 c) {\n"
+	"  vec2 v = vec2(off.x * dir.x + off.y * dir.y, off.x * -dir.y + off.y * dir.x) * len2;\n"
+	"  float d2 = min(dot(v, v), clp);\n"
+	"  float wB = 0.4 * d2 - 1.0, wA = lob * d2 - 1.0;\n"
+	"  wB *= wB; wA *= wA; wB = 1.5625 * wB - 0.5625;\n"
+	"  float w = wB * wA; ac += c * w; aw += w;\n"
+	"}\n"
+	"void main() {\n"
+	"  vec2 pp = (gl_FragCoord.xy - origin) * scale - 0.5;\n"
+	"  vec2 fp = floor(pp); pp -= fp; ivec2 q = ivec2(fp);\n"
+	"  vec3 b = T(q + ivec2(0, -1)), c = T(q + ivec2(1, -1));\n"
+	"  vec3 e = T(q + ivec2(-1, 0)), f = T(q), g = T(q + ivec2(1, 0)), h = T(q + ivec2(2, 0));\n"
+	"  vec3 i = T(q + ivec2(-1, 1)), j = T(q + ivec2(0, 1)), k = T(q + ivec2(1, 1)), l = T(q + ivec2(2, 1));\n"
+	"  vec3 n = T(q + ivec2(0, 2)), m = T(q + ivec2(1, 2));\n"
+	"  float bL = L(b), cL = L(c), eL = L(e), fL = L(f), gL = L(g), hL = L(h);\n"
+	"  float iL = L(i), jL = L(j), kL = L(k), lL = L(l), nL = L(n), mL = L(m);\n"
+	"  vec2 dir = vec2(0.0); float len = 0.0;\n"
+	"  Set(dir, len, (1.0 - pp.x) * (1.0 - pp.y), bL, eL, fL, gL, jL);\n"
+	"  Set(dir, len, pp.x * (1.0 - pp.y), cL, fL, gL, hL, kL);\n"
+	"  Set(dir, len, (1.0 - pp.x) * pp.y, fL, iL, jL, kL, nL);\n"
+	"  Set(dir, len, pp.x * pp.y, gL, jL, kL, lL, mL);\n"
+	"  float dirR = dot(dir, dir); bool zro = dirR < 1.0 / 32768.0;\n"
+	"  dirR = zro ? 1.0 : inversesqrt(dirR); dir.x = zro ? 1.0 : dir.x; dir *= dirR;\n"
+	"  len = len * 0.5; len *= len;\n"
+	"  float stretch = dot(dir, dir) / max(abs(dir.x), abs(dir.y));\n"
+	"  vec2 len2 = vec2(1.0 + (stretch - 1.0) * len, 1.0 - 0.5 * len);\n"
+	"  float lob = 0.5 + (0.25 - 0.04 - 0.5) * len, clp = 1.0 / lob;\n"
+	"  vec3 mn = min(min(f, g), min(j, k)), mx = max(max(f, g), max(j, k));\n"
+	"  vec3 ac = vec3(0.0); float aw = 0.0;\n"
+	"  Tap(ac, aw, vec2(0.0, -1.0) - pp, dir, len2, lob, clp, b);\n"
+	"  Tap(ac, aw, vec2(1.0, -1.0) - pp, dir, len2, lob, clp, c);\n"
+	"  Tap(ac, aw, vec2(-1.0, 1.0) - pp, dir, len2, lob, clp, i);\n"
+	"  Tap(ac, aw, vec2(0.0, 1.0) - pp, dir, len2, lob, clp, j);\n"
+	"  Tap(ac, aw, vec2(0.0, 0.0) - pp, dir, len2, lob, clp, f);\n"
+	"  Tap(ac, aw, vec2(-1.0, 0.0) - pp, dir, len2, lob, clp, e);\n"
+	"  Tap(ac, aw, vec2(1.0, 1.0) - pp, dir, len2, lob, clp, k);\n"
+	"  Tap(ac, aw, vec2(2.0, 1.0) - pp, dir, len2, lob, clp, l);\n"
+	"  Tap(ac, aw, vec2(2.0, 0.0) - pp, dir, len2, lob, clp, h);\n"
+	"  Tap(ac, aw, vec2(1.0, 0.0) - pp, dir, len2, lob, clp, g);\n"
+	"  Tap(ac, aw, vec2(1.0, 2.0) - pp, dir, len2, lob, clp, m);\n"
+	"  Tap(ac, aw, vec2(0.0, 2.0) - pp, dir, len2, lob, clp, n);\n"
+	"  o = vec4(min(mx, max(mn, ac / aw)), 1.0);\n"
+	"}\n";
+static const char *rcas_fs =
+	"#version 330 core\n"
+	"out vec4 o;\n"
+	"uniform sampler2D src; uniform vec2 origin; uniform ivec2 isize; uniform float sharp;\n"
+	"vec3 T(ivec2 p) { return texelFetch(src, clamp(p, ivec2(0), isize - 1), 0).rgb; }\n"
+	"void main() {\n"
+	"  ivec2 q = ivec2(gl_FragCoord.xy - origin);\n"
+	"  vec3 b = T(q + ivec2(0, -1)), d = T(q + ivec2(-1, 0)), e = T(q), f = T(q + ivec2(1, 0)), h = T(q + ivec2(0, 1));\n"
+	"  vec3 mn4 = min(min(b, d), min(f, h)), mx4 = max(max(b, d), max(f, h));\n"
+	"  vec3 hitMin = min(mn4, e) / max(4.0 * mx4, vec3(1e-5));\n"
+	"  vec3 hitMax = (1.0 - max(mx4, e)) / min(4.0 * mn4 - 4.0, vec3(-1e-5));\n"
+	"  vec3 lobeC = max(-hitMin, hitMax);\n"
+	"  float lobe = max(-0.1875, min(max(lobeC.r, max(lobeC.g, lobeC.b)), 0.0)) * sharp;\n"
+	"  o = vec4(clamp((lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0), 0.0, 1.0), 1.0);\n"
+	"}\n";
+
+static GLuint fsr_easu, fsr_rcas, fsr_vao, fsr_vbo, fsr_fbo, fsr_tex;
+static GLint u_e_src, u_e_origin, u_e_scale, u_e_isize, u_r_src, u_r_origin, u_r_isize, u_r_sharp;
+static int fsr_w, fsr_h, fsr_state;	/* fsr_state: 0 not tried, 1 ready, -1 off (linear, or a shader failed) */
+
+static GLuint fsr_shader(GLenum type, const char *src)
+{
+	GLuint s = glCreateShader(type);
+	glShaderSource(s, 1, &src, 0);
+	glCompileShader(s);
+	GLint ok;
+	glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+	if (!ok)
+	{
+		char log[1024];
+		glGetShaderInfoLog(s, sizeof(log), 0, log);
+		printf("video: FSR shader rejected, upscaling bilinear instead:\n%s\n", log);
+		return 0;
+	}
+	return s;
+}
+
+static int fsr_ready(void)
+{
+	if (fsr_state)
+		return fsr_state > 0;
+	fsr_state = -1;
+	const char *u = getenv("M1_UPSCALE");
+	if (u && !strcmp(u, "linear"))
+		return 0;
+	const GLuint vs = fsr_shader(GL_VERTEX_SHADER, fsr_vs), es = fsr_shader(GL_FRAGMENT_SHADER, easu_fs),
+				 rs = fsr_shader(GL_FRAGMENT_SHADER, rcas_fs);
+	if (!vs || !es || !rs)
+		return 0;
+	fsr_easu = glCreateProgram();
+	glAttachShader(fsr_easu, vs);
+	glAttachShader(fsr_easu, es);
+	glLinkProgram(fsr_easu);
+	fsr_rcas = glCreateProgram();
+	glAttachShader(fsr_rcas, vs);
+	glAttachShader(fsr_rcas, rs);
+	glLinkProgram(fsr_rcas);
+	u_e_src = glGetUniformLocation(fsr_easu, "src");
+	u_e_origin = glGetUniformLocation(fsr_easu, "origin");
+	u_e_scale = glGetUniformLocation(fsr_easu, "scale");
+	u_e_isize = glGetUniformLocation(fsr_easu, "isize");
+	u_r_src = glGetUniformLocation(fsr_rcas, "src");
+	u_r_origin = glGetUniformLocation(fsr_rcas, "origin");
+	u_r_isize = glGetUniformLocation(fsr_rcas, "isize");
+	u_r_sharp = glGetUniformLocation(fsr_rcas, "sharp");
+	static const float tri[6] = { -1, -1, 3, -1, -1, 3 };	/* one triangle covers the viewport */
+	glGenVertexArrays(1, &fsr_vao);
+	glBindVertexArray(fsr_vao);
+	glGenBuffers(1, &fsr_vbo);
+	glBindBuffer(GL_ARRAY_BUFFER, fsr_vbo);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(tri), tri, GL_STATIC_DRAW);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8, (void *)0);
+	glEnableVertexAttribArray(0);
+	glGenFramebuffers(1, &fsr_fbo);
+	glGenTextures(1, &fsr_tex);
+	fsr_state = 1;
+	printf("video: FSR 1 upscaling ready\n");
+	return 1;
+}
+
+/* resolve_tex (rw x rh) into the window's area x0, y0, vw x vh; 0: not done (bilinear instead) */
+static int fsr_present(int rw, int rh, int x0, int y0, int vw, int vh)
+{
+	if (!fsr_ready())
+		return 0;
+	GLint active, tex0;
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+	glActiveTexture(GL_TEXTURE0);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &tex0);
+	const GLboolean depth = glIsEnabled(GL_DEPTH_TEST), blend = glIsEnabled(GL_BLEND), stencil = glIsEnabled(GL_STENCIL_TEST),
+					cull = glIsEnabled(GL_CULL_FACE), scissor = glIsEnabled(GL_SCISSOR_TEST);
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_BLEND);
+	glDisable(GL_STENCIL_TEST);
+	glDisable(GL_CULL_FACE);
+	glDisable(GL_SCISSOR_TEST);
+	if (vw != fsr_w || vh != fsr_h)
+	{
+		fsr_w = vw, fsr_h = vh;
+		glBindTexture(GL_TEXTURE_2D, fsr_tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, vw, vh, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glBindFramebuffer(GL_FRAMEBUFFER, fsr_fbo);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, fsr_tex, 0);
+	}
+	glBindVertexArray(fsr_vao);
+	/* EASU: the drawn picture, enlarged into fsr_tex */
+	glBindFramebuffer(GL_FRAMEBUFFER, fsr_fbo);
+	glViewport(0, 0, vw, vh);
+	glUseProgram(fsr_easu);
+	glBindTexture(GL_TEXTURE_2D, resolve_tex);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);	/* no mipmaps: complete for texelFetch */
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glUniform1i(u_e_src, 0);
+	glUniform2f(u_e_origin, 0, 0);
+	glUniform2f(u_e_scale, (float)rw / (float)vw, (float)rh / (float)vh);
+	glUniform2i(u_e_isize, rw, rh);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	/* RCAS: sharpened into the window (sharpness 0.2 stops, AMD's default: 2^-0.2) */
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glViewport(x0, y0, vw, vh);
+	glUseProgram(fsr_rcas);
+	glBindTexture(GL_TEXTURE_2D, fsr_tex);
+	glUniform1i(u_r_src, 0);
+	glUniform2f(u_r_origin, (float)x0, (float)y0);
+	glUniform2i(u_r_isize, vw, vh);
+	glUniform1f(u_r_sharp, 0.87055f);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	/* the frame's own state again */
+	glUseProgram(prog);
+	glBindVertexArray(vao);
+	glBindBuffer(GL_ARRAY_BUFFER, vbo);
+	glBindTexture(GL_TEXTURE_2D, (GLuint)tex0);
+	glActiveTexture((GLenum)active);
+	if (depth) glEnable(GL_DEPTH_TEST);
+	if (blend) glEnable(GL_BLEND);
+	if (stencil) glEnable(GL_STENCIL_TEST);
+	if (cull) glEnable(GL_CULL_FACE);
+	if (scissor) glEnable(GL_SCISSOR_TEST);
+	return 1;
+}
+
 /* the monitor's size (the desktop mode of the window's display) */
 static void display_size(int *w, int *h)
 {
@@ -277,6 +539,14 @@ static void display_size(int *w, int *h)
 		*w = 1920, *h = 1080;
 	else
 		*w = m.w, *h = m.h;
+}
+
+/* a picture's shape (width / height) for a w x h area: 4:3 to 16:9 (wider screens get bars at
+   the sides, narrower ones at the top and bottom) */
+static float picture_aspect(int w, int h)
+{
+	const float a = h > 0 ? (float)w / (float)h : 16.0f / 9;
+	return a > 16.0f / 9 ? 16.0f / 9 : a < 4.0f / 3 ? 4.0f / 3 : a;
 }
 
 /* a window: the chosen resolution's size (native: M1_WINDOW or 1280x720), shrunk to fit the
@@ -291,16 +561,34 @@ static void window_fit(void)
 	SDL_Rect u;
 	if (!SDL_GetDisplayUsableBounds(SDL_GetWindowDisplayIndex(win), &u) && (w > u.w * 9 / 10 || h > u.h * 9 / 10))
 	{
+		const float a = picture_aspect(w, h);
 		h = u.h * 9 / 10;
-		w = h * 16 / 9;
+		w = (int)(h * a + 0.5f);
 		if (w > u.w * 9 / 10)
-			w = u.w * 9 / 10, h = w * 9 / 16;
+			w = u.w * 9 / 10, h = (int)(w / a + 0.5f);
 	}
 	SDL_SetWindowSize(win, w, h);
 	SDL_SetWindowPosition(win, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
 }
 
 int video_is_fullscreen(void) { return win && (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0; }
+
+/* GRAPHICS' UPDATE line (online.c): the release page in the browser; a full screen game is
+   minimized first, so the browser is not hidden behind it */
+void video_open_url(const char *url)
+{
+	if (win && video_is_fullscreen())
+		SDL_MinimizeWindow(win);
+#ifdef _WIN32
+	const int ok = SDL_OpenURL(url) == 0;
+#else
+	/* xdg-open, not SDL_OpenURL: the player's SDL2 may be older than 2.0.14 */
+	pid_t pid;
+	char *argv[] = { "xdg-open", (char *)url, 0 };
+	const int ok = posix_spawnp(&pid, "xdg-open", 0, 0, argv, environ) == 0;
+#endif
+	printf("open %s: %s\n", url, ok ? "ok" : "failed");
+}
 
 /* a GRAPHICS change also goes into this process's environment: a restart into or out of an
    online match (online.c relaunch) inherits it, and the settings file is only read where the
@@ -329,25 +617,75 @@ void video_toggle_fullscreen(void)
 	setting_env("M1_FULLSCREEN", full ? "1" : "0");
 }
 
-/* the resolutions offered: native, then the usual 16:9 sizes up to the monitor's */
-static const int sizes[][2] = { { 1280, 720 }, { 1600, 900 }, { 1920, 1080 }, { 2560, 1440 }, { 3200, 1800 }, { 3840, 2160 },
-								{ 5120, 2880 }, { 7680, 4320 } };
+/* the resolutions offered: native (the screen's shape, 4:3 to 16:9), then the usual 16:9, 16:10
+   and 4:3 sizes up to the monitor's, by height */
+static const int sizes[][2] = { { 1280, 720 }, { 1024, 768 }, { 1280, 800 }, { 1600, 900 }, { 1680, 1050 }, { 1920, 1080 },
+								{ 1440, 1080 }, { 1920, 1200 }, { 1600, 1200 }, { 2560, 1440 }, { 1920, 1440 }, { 2560, 1600 },
+								{ 3200, 1800 }, { 3840, 2160 }, { 2880, 2160 }, { 3840, 2400 }, { 5120, 2880 }, { 7680, 4320 } };
 
 void video_resolution_label(char *buf, size_t n)
 {
 	int w, h;
 	display_size(&w, &h);
+	if (win && !video_is_fullscreen())
+		SDL_GL_GetDrawableSize(win, &w, &h);	/* in a window, native is the window's size */
 	if (res_w)
 		snprintf(buf, n, "%d X %d", res_w, res_h);
 	else
-		snprintf(buf, n, "NATIVE %d X %d", w, h * 16 / 9 > w ? w * 9 / 16 : h);
+	{
+		/* the screen's (or window's) size in the picture's shape */
+		const float a = picture_aspect(w, h);
+		const int pw = (int)(h * a + 0.5f) > w ? w : (int)(h * a + 0.5f), ph = (int)(pw / a + 0.5f) > h ? h : (int)(pw / a + 0.5f);
+		if (res_pct)
+			snprintf(buf, n, "FSR %s", res_pct >= 77 ? "ULTRA QUALITY" : res_pct >= 67 ? "QUALITY" : res_pct >= 59 ? "BALANCED" : "PERFORMANCE");
+		else
+			snprintf(buf, n, "NATIVE %d X %d", pw, ph);
+	}
 }
 
+/* the resolution line's help: with FSR, the size the game is drawn at */
+void video_resolution_help(char *buf, size_t n)
+{
+	if (res_w || !res_pct)
+	{
+		snprintf(buf, n, "Resolution the game draws at. Select to change.");
+		return;
+	}
+	int w, h;
+	display_size(&w, &h);
+	if (win && !video_is_fullscreen())
+		SDL_GL_GetDrawableSize(win, &w, &h);
+	const float a = picture_aspect(w, h);
+	const int pw = (int)(h * a + 0.5f) > w ? w : (int)(h * a + 0.5f), ph = (int)(pw / a + 0.5f) > h ? h : (int)(pw / a + 0.5f);
+	snprintf(buf, n, "Drawn at %d x %d and sharpened up to your screen.", pw * res_pct / 100, ph * res_pct / 100);
+}
+
+/* native, FSR 77%, 67%, 59%, 50% (of native), then the sizes up to the monitor's, then native */
 void video_next_resolution(void)
 {
 	int dw, dh;
 	display_size(&dw, &dh);
-	const int n = (int)(sizeof(sizes) / sizeof(sizes[0]));
+	const int n = (int)(sizeof(sizes) / sizeof(sizes[0])), np = (int)(sizeof(fsr_pcts) / sizeof(fsr_pcts[0]));
+	char v[32] = "native";
+	if (!res_w)
+	{
+		int p = -1;
+		for (int i = 0; i < np; i++)
+			if (fsr_pcts[i] == res_pct)
+				p = i;
+		if (p + 1 < np)
+		{
+			res_pct = fsr_pcts[p + 1];
+			snprintf(v, sizeof(v), "%d%%", res_pct);
+			if (win && !video_is_fullscreen())
+				window_fit();
+			config_set("video", "resolution", v);
+			config_save();
+			setting_env("M1_RESOLUTION", v);
+			return;
+		}
+		res_pct = 0;	/* after 50%: the first fixed size */
+	}
 	int cur = -1;
 	for (int i = 0; i < n; i++)
 		if (sizes[i][0] == res_w && sizes[i][1] == res_h)
@@ -359,7 +697,6 @@ void video_next_resolution(void)
 			next = i;
 			break;
 		}
-	char v[32] = "native";
 	if (next < 0)
 		res_w = res_h = 0;	/* after the largest: back to native */
 	else
@@ -473,10 +810,58 @@ static void pad_removed(SDL_JoystickID id)
 			pads[k] = 0;
 		}
 }
+/* what the shoulder buttons and triggers press ([pad] lb rb lt rt in voldorium.ini): Dreamcast
+   buttons joined with +, e.g. "a+b" (the game's Button Config then maps them to moves). The
+   default is the Dreamcast's L (lb, lt) and R (rb, rt). A combination is one input to netplay,
+   like any button. */
+const char *config_get(const char *section, const char *key);
+static u32 pad_combo_bits(const char *s, u32 def)
+{
+	if (!s || !*s)
+		return def;
+	static const struct { const char *name; u32 bit; } names[] = {
+		{ "a", 0x0004 }, { "b", 0x0002 }, { "x", 0x0400 }, { "y", 0x0200 }, { "l", 0x1000 }, { "r", 0x2000 },
+		{ "start", 0x0008 },
+	};
+	u32 b = 0;
+	char buf[64];
+	snprintf(buf, sizeof(buf), "%s", s);
+	for (char *t = strtok(buf, "+ \t"); t; t = strtok(0, "+ \t"))
+	{
+		u32 bit = 0;
+		for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+			if (!SDL_strcasecmp(t, names[i].name))
+				bit = names[i].bit;
+		if (!bit)
+		{
+			printf("voldorium.ini [pad]: unknown button \"%s\" in \"%s\" (a b x y l r start)\n", t, s);
+			return def;
+		}
+		b |= bit;
+	}
+	return b;
+}
+static u32 pad_combo[4];	/* lb, rb, lt, rt */
+static void pad_combos_load(void)
+{
+	static const char *const keys[4] = { "lb", "rb", "lt", "rt" };
+	static const u32 defs[4] = { 0x1000, 0x2000, 0x1000, 0x2000 };
+	for (int i = 0; i < 4; i++)
+	{
+		char env[16];
+		snprintf(env, sizeof(env), "M1_PAD_%c%c", keys[i][0] - 32, keys[i][1] - 32);	/* M1_PAD_LT (tests) */
+		const char *v = getenv(env);
+		pad_combo[i] = pad_combo_bits(v ? v : config_get("pad", keys[i]), defs[i]);
+	}
+	printf("pad: lb %04x rb %04x lt %04x rt %04x (Dreamcast button bits)\n", pad_combo[0], pad_combo[1], pad_combo[2], pad_combo[3]);
+}
+
 static u32 pad_bits(SDL_GameController *pad)
 {
 	if (!pad)
 		return 0;
+	if (!pad_combo[0])
+		pad_combos_load();
 	u32 b = 0;
 	/* left stick as the D-pad */
 	const int dz = 16000;
@@ -485,16 +870,17 @@ static u32 pad_bits(SDL_GameController *pad)
 	if (ax > dz) b |= 0x0080;
 	if (ay < -dz) b |= 0x0010;
 	if (ay > dz) b |= 0x0020;
-	/* triggers, or the shoulder buttons */
-	if (SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > dz) b |= 0x1000;
-	if (SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > dz) b |= 0x2000;
+	/* triggers and shoulder buttons: [pad] lt rt lb rb */
+	if (SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > dz) b |= pad_combo[2];
+	if (SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > dz) b |= pad_combo[3];
+	if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER)) b |= pad_combo[0];
+	if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) b |= pad_combo[1];
 	static const struct { int btn; u32 bit; } map[] = {
 		{ SDL_CONTROLLER_BUTTON_A, 0x0004 }, { SDL_CONTROLLER_BUTTON_B, 0x0002 },
 		{ SDL_CONTROLLER_BUTTON_X, 0x0400 }, { SDL_CONTROLLER_BUTTON_Y, 0x0200 },
 		{ SDL_CONTROLLER_BUTTON_START, 0x0008 }, { SDL_CONTROLLER_BUTTON_DPAD_UP, 0x0010 },
 		{ SDL_CONTROLLER_BUTTON_DPAD_DOWN, 0x0020 }, { SDL_CONTROLLER_BUTTON_DPAD_LEFT, 0x0040 },
 		{ SDL_CONTROLLER_BUTTON_DPAD_RIGHT, 0x0080 },
-		{ SDL_CONTROLLER_BUTTON_LEFTSHOULDER, 0x1000 }, { SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, 0x2000 },
 	};
 	for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); i++)
 		if (SDL_GameControllerGetButton(pad, map[i].btn))
@@ -527,6 +913,7 @@ int video_enabled(void)
 	/* the picture is drawn into a frame buffer of its own (resolution and anti-aliasing,
 	   see "frame buffer" below); the window only shows it */
 	video_settings_load();
+	pad_combos_load();
 	int win_w = 1280, win_h = 720;
 	if (getenv("M1_WINDOW"))
 		sscanf(getenv("M1_WINDOW"), "%dx%d", &win_w, &win_h);
@@ -568,12 +955,18 @@ int video_enabled(void)
 	u_alpha_ref = glGetUniformLocation(prog, "alpha_ref");
 	u_fog = glGetUniformLocation(prog, "fog");
 	u_fog_col = glGetUniformLocation(prog, "fog_col");
+	u_fog_col_ram = glGetUniformLocation(prog, "fog_col_ram");
+	u_fog_density = glGetUniformLocation(prog, "fog_density");
+	u_fog_tab = glGetUniformLocation(prog, "fog_tab");
+	glUniform1i(u_fog_tab, 1);	/* texture unit 1 */
 	u_target = glGetUniformLocation(prog, "target");
 	u_ymap = glGetUniformLocation(prog, "ymap");
 	glUniform2f(u_ymap, 0, 1);
 	u_xmap = glGetUniformLocation(prog, "xmap");
 	u_umap = glGetUniformLocation(prog, "umap");
 	u_xoff = glGetUniformLocation(prog, "xoff");
+	u_xzoom = glGetUniformLocation(prog, "xzoom");
+	glUniform1f(u_xzoom, 1);
 	glUniform1i(u_tex, 0);
 	glGenVertexArrays(1, &vao);
 	glBindVertexArray(vao);
@@ -591,12 +984,28 @@ int video_enabled(void)
 	return enabled;
 }
 
+/* a texture's pixels. A texture re-uploaded at the same size (animated textures, palette cycling:
+   five a frame in Inferno's defeat, issue #11) gets new contents in its existing storage
+   (glTexSubImage2D): re-creating the storage of a texture the previous frame may still be drawing
+   with can make a driver wait for the GPU */
 unsigned gl_upload_texture(unsigned id, u32 w, u32 h, const u32 *rgba)
 {
+	enum { NSIZES = 1 << 16 };
+	static u32 *sizes;	/* per texture name: w << 16 | h of its storage */
+	if (!sizes)
+		sizes = calloc(NSIZES, sizeof(*sizes));
 	if (!id)
 		glGenTextures(1, &id);
 	glBindTexture(GL_TEXTURE_2D, id);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+	const u32 key = w << 16 | h;
+	if (id < NSIZES && sizes && sizes[id] == key)
+		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)w, (GLsizei)h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+	else
+	{
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+		if (id < NSIZES && sizes)
+			sizes[id] = key;
+	}
 	return id;
 }
 
@@ -640,6 +1049,8 @@ void config_set(const char *section, const char *key, const char *value);
 void config_save(void);
 int video_text_sharp(void);
 
+static int esc_confirmed(void);
+
 void video_poll(void)
 {
 	if (!video_enabled())
@@ -662,6 +1073,10 @@ void video_poll(void)
 			{
 				video_toggle_fullscreen();	/* remembered in voldorium.ini */
 			}
+			else if (k == SDLK_F12)
+				player_shot = 1;	/* saved after the next frame (player_screenshot) */
+			else if (k == SDLK_ESCAPE && !esc_confirmed())
+				;	/* the first press only shows "Press Esc again to quit" (issue #16) */
 			else if (k == SDLK_ESCAPE)
 			{
 				if (getenv("M1_NET_PRELUDE"))
@@ -832,6 +1247,47 @@ static u32 background_colour(void)
 	return vram_rd32_map32(addr + colword * 4);
 }
 
+/* F12: the next finished picture (at the drawing resolution, without the window's bars) as
+   screenshots/Voldorium <date> <time>.png next to the executable. Xbox Game Bar captures nothing
+   from this OpenGL window, so the game takes its own (issue #10). */
+static void player_screenshot(int w, int h)
+{
+	u8 *px = malloc((size_t)w * h * 3), *top = malloc((size_t)w * h * 3);
+	if (!px || !top)
+	{
+		free(px), free(top);
+		return;
+	}
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px);
+	for (int y = 0; y < h; y++)
+		memcpy(top + (size_t)y * w * 3, px + (size_t)(h - 1 - y) * w * 3, (size_t)w * 3);
+	const char *config_exe_dir(void);
+	int png_write_rgb(const char *path, const u8 *rgb, u32 w, u32 h);
+	char dir[1100], path[1200];
+	snprintf(dir, sizeof(dir), "%s/screenshots", config_exe_dir());
+#ifdef _WIN32
+	CreateDirectoryA(dir, 0);
+#else
+	mkdir(dir, 0755);
+#endif
+	const time_t now = time(0);
+	char stamp[32];
+	strftime(stamp, sizeof(stamp), "%Y-%m-%d %H-%M-%S", localtime(&now));
+	snprintf(path, sizeof(path), "%s/Voldorium %s.png", dir, stamp);
+	for (int k = 2; k < 100; k++)
+	{
+		FILE *f = fopen(path, "rb");	/* two in one second: "... (2).png" */
+		if (!f)
+			break;
+		fclose(f);
+		snprintf(path, sizeof(path), "%s/Voldorium %s (%d).png", dir, stamp, k);
+	}
+	const int ok = png_write_rgb(path, top, (u32)w, (u32)h);
+	printf("screenshot %s (%dx%d): %s\n", path, w, h, ok ? "saved" : "could not be written");
+	free(px), free(top);
+}
+
 static void screenshot(u64 n, int w, int h)
 {
 	static u8 *px;
@@ -981,22 +1437,22 @@ void video_next_hud(void)
 	config_save();
 	setting_env("M1_HUD", names[hud_mode]);
 }
-/* [video] backgrounds (M1_BGMODE): 0 blur, 1 replace, 2 stretch (default); see side_fill */
+/* [video] backgrounds (M1_BGMODE): 0 blur, 1 replace, 2 stretch (default), 3 black; see side_fill */
 static int bg_mode = -1;
 int video_backgrounds(void)
 {
 	if (bg_mode < 0)
 	{
 		const char *m = getenv("M1_BGMODE");
-		bg_mode = m && !strcmp(m, "replace") ? 1 : m && !strcmp(m, "blur") ? 0 : 2;
+		bg_mode = m && !strcmp(m, "replace") ? 1 : m && !strcmp(m, "blur") ? 0 : m && !strcmp(m, "black") ? 3 : 2;
 	}
 	return bg_mode;
 }
 
 void video_next_backgrounds(void)
 {
-	static const int next[3] = { 1, 2, 0 };	/* stretch, blur, replace, stretch... */
-	static const char *const names[3] = { "blur", "replace", "stretch" };
+	static const int next[4] = { 3, 2, 0, 1 };	/* stretch, blur, black, replace, stretch... */
+	static const char *const names[4] = { "blur", "replace", "stretch", "black" };
 	bg_mode = next[video_backgrounds()];
 	config_set("video", "backgrounds", names[bg_mode]);
 	config_save();
@@ -1022,8 +1478,14 @@ void video_next_text(void)
 
 static float side_anchor(float cx)
 {
-	static const float left[3] = { 0, 160, 320 };
-	return cx < 280 ? left[video_hud()] : cx > 360 ? 640 - left[video_hud()] : 320;
+	/* the 4:3 screen's left edge (x 0, squeezed by 0.75 about the anchor) lands on the picture's
+	   left edge (EDGES), halfway between it and where 4:3 shows it (MIDDLE), or there (4:3, x 80);
+	   the right edge likewise. A picture narrower than 16:9 has its edge at 320 - 320 / view_zoom.
+	   An anchor a puts x 0 at a * (1 - 0.75), so a = 4 * that place: 0, 160, 320 in 16:9 */
+	const float edge = 320 - 320 / view_zoom;
+	const float place[3] = { edge, (edge + 80) / 2, 80 };
+	const float a = 4 * place[video_hud()];
+	return cx < 280 ? a : cx > 360 ? 640 - a : 320;
 }
 
 /* the anchor of the largest panel around (x, y) (a margin takes in the panels' corner pieces),
@@ -1067,9 +1529,13 @@ static void wide_map(const TaCtx *c, const TaPoly *p, float *xa, float *xk, floa
 	   3D strip was squeezed like 2D while its neighbours were not, opening lines between them
 	   (the character select's light streaks) */
 	const int flat = isfinite(z0) && isfinite(z1) && z1 - z0 <= 1e-6f * (z1 > 1 ? z1 : 1);
-	if (!flat)
-		return;	/* 3D */
 	const int battle = rd32(0x8c24a584) == 1;	/* game mode 1 = fight */
+	/* the menus' 3D pieces (0x8c0ef6c0: the stage select's stage tiles and the chosen stage's
+	   plate, issue #11) are laid out in the 4:3 screen without the game's widescreen projection:
+	   like 2D, they are compressed about the centre with the panels around them */
+	const int menu_3d = !battle && p->caller == 0x8c0ef6c0u && isfinite(z0) && isfinite(z1);
+	if (!flat && !menu_3d)
+		return;	/* 3D */
 	const int textured = (p->isp >> 25) & 1;
 	(void)us;
 	if (!battle && textured && !(p->cls == 0 && z1 < 0.01f && x0 <= 1 && x1 >= 639))
@@ -1508,6 +1974,7 @@ static void tiled_layer(const TaCtx *c)
 }
 
 static int bg_tiled_picture;	/* the background is the mission battle map (bg_mask) */
+static int bg_gallery_picture;	/* the Art Gallery's picture viewer is showing (bg_mask) */
 
 /* marks the polygons of the frame's 4:3 background layer; returns how many */
 static u32 bg_mask(const TaCtx *c, u8 *mask)
@@ -1516,6 +1983,13 @@ static u32 bg_mask(const TaCtx *c, u8 *mask)
 	const int battle = mode == 1 || mode == 23 || mode == 45;	/* fight, demo fight, demo replay */
 	memset(mask, 0, c->np);
 	bg_tiled_picture = 0;
+	/* the Art Gallery (game mode 61): its menus' tiled background is darkened and point sampled,
+	   the picture viewer's tiles are filtered (TSP filter mode, bits 13-14), with or without a
+	   caption over them and through the fades between pictures */
+	bg_gallery_picture = 0;
+	if (mode == 61)
+		for (u32 i = 0; i < c->np && !bg_gallery_picture; i++)
+			bg_gallery_picture = c->p[i].cls == M1_2D_TILED && ((c->p[i].tsp >> 13) & 3);
 	if (battle)
 		return 0;
 	float zmax = -1, tx0 = 1e30f, tx1 = -1e30f;
@@ -1555,7 +2029,11 @@ static u32 bg_mask(const TaCtx *c, u8 *mask)
 	/* a repeating tiled layer is no part of a 4:3 picture: its pieces at the screen edges would
 	   otherwise make the whole layer switch between background and not as it scrolls */
 	tiled_layer(c);
-	const int wallpaper = tx0 < -32 || tx1 > 672 || tiled_period > 0;
+	/* the mission battle map once it can scroll (a save with more than one region) draws a margin
+	   of up to a tile (64) beyond the 4:3 screen on either side: still the map, not a wallpaper
+	   (issue #17); the draw loop keeps that margin out of the sides */
+	const int map_margin = (mode == 62 || mode == 63) && tx0 <= 1 && tx1 >= 639 && tx0 >= -130 && tx1 <= 770;
+	const int wallpaper = !map_margin && (tx0 < -32 || tx1 > 672 || tiled_period > 0);
 	/* the mission battle map (game modes 62/63, a tiled picture of exactly the screen, scrolled
 	   through its texture) is the background by itself: other pieces at the edges (the map's
 	   flying comet) would move the depth limit, and the map's markers with it, between frames.
@@ -1614,10 +2092,11 @@ static void draw_replacement(int id, const u8 *rgba, u32 w, u32 h)
 	 stretch  the background layer is drawn at full width (stretched by 4/3; menus, logos and
 			  text in front stay undistorted). Returns 2: see the draw loop. Not for a tiled
 			  picture of the screen (the mission battle map): its markers would leave their
-			  places, so it gets the blur fill
+			  places, so it gets the blur fill; nor for the Art Gallery's pictures (blur fill)
 	 replace  its 16:9 replacement picture if there is one (returns 1: the layer's own
 			  polygons are then not drawn, see bg_layer), else the blur fill
 	 blur	 the blur fill only
+	 black	 nothing: black sides, as on a 16:9 TV (issue #15)
    M1_BLURFILL=0 turns the blur fill off. */
 static u8 *bg_layer;
 static int side_fill(TaCtx *c, const u32 *order, u32 n)
@@ -1633,8 +2112,45 @@ static int side_fill(TaCtx *c, const u32 *order, u32 n)
 		bg_layer = realloc(bg_layer, cap = c->np);
 	if (!bg_mask(c, bg_layer))
 		return 0;
-	if (mode == 2 && !bg_tiled_picture)
-		return 2;	/* stretch; a tiled picture gets the blur fill instead: markers are placed on it */
+	{
+		/* a 4:3 picture covers the 4:3 screen: the layer must cover nearly all of a 32 x 24
+		   grid of it. The ending's credits shrink the picture into a frame between full-width
+		   strips; enlarged into the sides, those made dark bars there (issue #11): such a
+		   layout keeps black sides, as its own surroundings */
+		static u8 grid[24][32];
+		memset(grid, 0, sizeof(grid));
+		for (u32 i = 0; i < c->np; i++)
+		{
+			if (!bg_layer[i])
+				continue;
+			const TaPoly *p = &c->p[i];
+			float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f;
+			for (u32 k = 0; k < p->count; k++)
+			{
+				const TaVert *t = &c->v[p->first + k];
+				x0 = fminf(x0, t->x), x1 = fmaxf(x1, t->x), y0 = fminf(y0, t->y), y1 = fmaxf(y1, t->y);
+			}
+			const int gx0 = (int)fmaxf(0, floorf(x0 / 20 + 0.25f)), gx1 = (int)fminf(32, ceilf(x1 / 20 - 0.25f));
+			const int gy0 = (int)fmaxf(0, floorf(y0 / 20 + 0.25f)), gy1 = (int)fminf(24, ceilf(y1 / 20 - 0.25f));
+			for (int gy = gy0; gy < gy1; gy++)
+				for (int gx = gx0; gx < gx1; gx++)
+					grid[gy][gx] = 1;
+		}
+		u32 covered = 0;
+		for (int gy = 0; gy < 24; gy++)
+			for (int gx = 0; gx < 32; gx++)
+				covered += grid[gy][gx];
+		if (covered < 32 * 24 * 85 / 100)
+		{
+			memset(bg_layer, 0, c->np);
+			return 0;
+		}
+	}
+	if (mode == 3)
+		return 0;	/* black sides */
+	if (mode == 2 && !bg_tiled_picture && !bg_gallery_picture)
+		return 2;	/* stretch; the mission battle map gets the blur fill instead (markers are placed
+					   on it), and so do the Art Gallery's pictures (artwork, never distorted) */
 	if (!blur_prog)
 	{
 		blur_init();
@@ -1705,8 +2221,50 @@ static int side_fill(TaCtx *c, const u32 *order, u32 n)
 	return 0;
 }
 
+/* the fog table (FOG_TABLE, 005F8200: 128 entries of 16 bits), FOG_COL_RAM and FOG_DENSITY (a
+   mantissa 1.7 in bits 15-8 and a signed exponent in bits 7-0) for table fog (TSP fog modes 0 and
+   3; the character select's light tunnel fades into its band with it, issue #11) */
+static void fog_table_update(void)
+{
+	static u16 last[128];
+	static int have;
+	u8 tab[256];
+	u16 cur[128];
+	for (int i = 0; i < 128; i++)
+	{
+		cur[i] = (u16)hw_reg(0x005f8200u + 4u * (u32)i);
+		tab[i] = (u8)(cur[i] & 255);		/* row 0: the end of the step */
+		tab[128 + i] = (u8)(cur[i] >> 8);	/* row 1: its start */
+	}
+	glActiveTexture(GL_TEXTURE1);
+	if (!fog_tex)
+	{
+		glGenTextures(1, &fog_tex);
+		glBindTexture(GL_TEXTURE_2D, fog_tex);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	}
+	else
+		glBindTexture(GL_TEXTURE_2D, fog_tex);
+	if (!have || memcmp(cur, last, sizeof(cur)))
+	{
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 128, 2, 0, GL_RED, GL_UNSIGNED_BYTE, tab);
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+		memcpy(last, cur, sizeof(cur));
+		have = 1;
+	}
+	glActiveTexture(GL_TEXTURE0);
+	const u32 fc = hw_reg(0x005f80b0), fd = hw_reg(0x005f80b8);
+	glUniform3f(u_fog_col_ram, ((fc >> 16) & 255) / 255.0f, ((fc >> 8) & 255) / 255.0f, (fc & 255) / 255.0f);
+	glUniform1f(u_fog_density, (float)((fd >> 8) & 255) / 128.0f * ldexpf(1.0f, (int)(s8)(fd & 255)));
+}
+
 static void draw_lists(TaCtx *c)
 {
+	fog_table_update();
 	glEnable(GL_DEPTH_TEST);
 	glDisable(GL_CULL_FACE);
 	glBindVertexArray(vao);
@@ -1813,22 +2371,33 @@ static void draw_lists(TaCtx *c)
 			float xa, xk, ua, uk;
 			wide_map(c, p, &xa, &xk, &ua, &uk);
 			if (replaced == 2 && bg_layer[idx[j]])
-				xa = 320, xk = 1, ua = 0, uk = 1;	/* stretched background: full width */
+				xa = 320, xk = 1 / view_zoom, ua = 0, uk = 1;	/* stretched background: the picture's full width */
 			glUniform2f(u_xmap, xa, xk);
 			glUniform2f(u_umap, ua, uk);
 			if (p->clip == 2)
 			{
-				const float cx0 = xa + (p->clip_rect[0] - xa) * xk, cx1 = xa + (p->clip_rect[2] - xa) * xk;
+				const float cx0 = 320 + (xa + (p->clip_rect[0] - xa) * xk - 320) * view_zoom,
+							cx1 = 320 + (xa + (p->clip_rect[2] - xa) * xk - 320) * view_zoom;
 				const int x0 = vp_x + (int)(cx0 * vp_w / tgt_w), x1 = vp_x + (int)(cx1 * vp_w / tgt_w);
 				const int y0 = vp_y + vp_h - p->clip_rect[3] * vp_h / tgt_h, y1 = vp_y + vp_h - p->clip_rect[1] * vp_h / tgt_h;
 				glEnable(GL_SCISSOR_TEST);
 				glScissor(x0, y0, x1 - x0, y1 - y0);
 			}
+			else if (bg_tiled_picture && replaced != 2 && p->cls == M1_2D_TILED)
+			{
+				/* the mission battle map: its scroll margin beyond the 4:3 screen (issue #17) is
+				   left out, so the sides show the background setting (blur, black, ...) */
+				const float cx0 = 320 + (xa + (0 - xa) * xk - 320) * view_zoom,
+							cx1 = 320 + (xa + (640 - xa) * xk - 320) * view_zoom;
+				const int x0 = vp_x + (int)(cx0 * vp_w / tgt_w), x1 = vp_x + (int)(cx1 * vp_w / tgt_w);
+				glEnable(GL_SCISSOR_TEST);
+				glScissor(x0, vp_y, x1 - x0, vp_h);
+			}
 			else
 				glDisable(GL_SCISSOR_TEST);
 			glUniform1f(u_xoff, 0);
 			draw_strip(c, p);
-			if (p->cls == M1_2D_TILED && xk != 1 && tiled_period > 0 && !(replaced == 2 && bg_layer[idx[j]]))
+			if (p->cls == M1_2D_TILED && xk != 1 && tiled_period > 0 && !bg_tiled_picture && !(replaced == 2 && bg_layer[idx[j]]))
 			{
 				/* copies one period or more to either side fill 16:9 (virtual x -249..889); a 4:3
 				   layer's copies only where the layer itself draws nothing, so nothing is drawn twice */
@@ -1894,6 +2463,7 @@ static void render_to_texture(TaCtx *c)
 	glBindFramebuffer(GL_FRAMEBUFFER, rtt_fbo);
 	glViewport(0, 0, (GLsizei)w, (GLsizei)h);
 	glUniform2f(u_target, (float)w, (float)h);
+	glUniform1f(u_xzoom, 1);
 	vp_x = vp_y = 0; vp_w = tgt_w = (int)w; vp_h = tgt_h = (int)h;
 	const u32 bg = background_colour();
 	glClearColor(((bg >> 16) & 255) / 255.0f, ((bg >> 8) & 255) / 255.0f, (bg & 255) / 255.0f, (bg >> 24) / 255.0f);
@@ -2038,38 +2608,51 @@ void video_record_vblank(void)
 
 static void render_frame_draw(TaCtx *c);
 
-/* "ver. 1.0.1" in the lower right corner, in the BIOS font like the game's help line, white with
-   a dark shadow; nothing without the font */
-static GLuint ver_prog, ver_tex;
+/* Text over the finished picture in the BIOS font, like the game's help line: white with a dark
+   outline and shadow; nothing without the font. Output only, never the game's state. */
+const char *online_latest(void);
+static GLuint label_prog;
 static GLint u_v_col;
-static int ver_w;
-static void draw_version(int rw, int rh)
+typedef struct
+{
+	GLuint tex;
+	int w;
+	char text[48];
+} Label;
+/* text 18 of 480 lines high, 8 lines above the bottom: at the right edge (right, 10 lines in)
+   or centred, at opacity a */
+static void draw_label(Label *lb, const char *text, int rw, int rh, int right, float a)
 {
 	const u8 *font = hw_font_12x24();
 	if (!font)
 		return;
 	if (!blur_prog)
 		blur_init();	/* its full-target triangle and vertex shader */
-	if (!ver_prog)
+	if (!label_prog)
 	{
 		static const char *fs =
 			"#version 330 core\n"
 			"in vec2 uv; out vec4 o;\n"
 			"uniform sampler2D src; uniform vec4 col;\n"
 			"void main() { o = vec4(col.rgb, col.a * texture(src, uv).r); }\n";
-		ver_prog = glCreateProgram();
-		glAttachShader(ver_prog, shader(GL_VERTEX_SHADER, blur_vs));
-		glAttachShader(ver_prog, shader(GL_FRAGMENT_SHADER, fs));
-		glLinkProgram(ver_prog);
-		u_v_col = glGetUniformLocation(ver_prog, "col");
+		label_prog = glCreateProgram();
+		glAttachShader(label_prog, shader(GL_VERTEX_SHADER, blur_vs));
+		glAttachShader(label_prog, shader(GL_FRAGMENT_SHADER, fs));
+		glLinkProgram(label_prog);
+		u_v_col = glGetUniformLocation(label_prog, "col");
+	}
+	if (!lb->tex || strcmp(text, lb->text))
+	{
+		snprintf(lb->text, sizeof(lb->text), "%s", text);
+		if (lb->tex)
+			glDeleteTextures(1, &lb->tex);
 		/* the text as a coverage mask, bottom row first (GL); glyph i is ASCII 32 + i */
-		static const char text[] = "ver. " VOLDORIUM_VERSION;
-		const int n = (int)sizeof(text) - 1;
-		ver_w = n * 12;
-		u8 *px = calloc((size_t)ver_w * 24, 1);
+		const int n = (int)strlen(lb->text);
+		lb->w = n * 12;
+		u8 *px = calloc((size_t)lb->w * 24, 1);
 		for (int k = 0; k < n; k++)
 		{
-			const int ch = (u8)text[k];
+			const int ch = (u8)lb->text[k];
 			if (ch < 33 || ch > 126)
 				continue;
 			const u8 *g = font + (ch - 32) * 36;
@@ -2078,13 +2661,13 @@ static void draw_version(int rw, int rh)
 				{
 					const int bit = y * 12 + x;
 					if (g[bit >> 3] & (0x80 >> (bit & 7)))
-						px[(23 - y) * ver_w + k * 12 + x] = 255;
+						px[(23 - y) * lb->w + k * 12 + x] = 255;
 				}
 		}
-		glGenTextures(1, &ver_tex);
-		glBindTexture(GL_TEXTURE_2D, ver_tex);
+		glGenTextures(1, &lb->tex);
+		glBindTexture(GL_TEXTURE_2D, lb->tex);
 		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, ver_w, 24, 0, GL_RED, GL_UNSIGNED_BYTE, px);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, lb->w, 24, 0, GL_RED, GL_UNSIGNED_BYTE, px);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -2092,22 +2675,21 @@ static void draw_version(int rw, int rh)
 		glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
 		free(px);
 	}
-	/* 18 of 480 lines high, 10 lines from the bottom and the right edge */
 	const float s = rh / 480.0f * 0.75f;
-	const int w = (int)(ver_w * s + 0.5f), h = (int)(24 * s + 0.5f);
-	const int x = rw - (int)(10 * rh / 480.0f) - w, y = (int)(8 * rh / 480.0f);
+	const int w = (int)(lb->w * s + 0.5f), h = (int)(24 * s + 0.5f);
+	const int x = right ? rw - (int)(10 * rh / 480.0f) - w : (rw - w) / 2, y = (int)(8 * rh / 480.0f);
 	const int sh = rh >= 1440 ? 3 : rh >= 720 ? 2 : 1;	/* outline width in pixels */
-	glUseProgram(ver_prog);
+	glUseProgram(label_prog);
 	glBindVertexArray(blur_vao);
 	glDisable(GL_SCISSOR_TEST);
 	glDisable(GL_DEPTH_TEST);
 	glDisable(GL_STENCIL_TEST);
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-	glBindTexture(GL_TEXTURE_2D, ver_tex);
-	/* a dark outline (8 directions) and a drop shadow, so it reads over any menu background (the
+	glBindTexture(GL_TEXTURE_2D, lb->tex);
+	/* a dark outline (8 directions) and a drop shadow, so it reads over any background (the
 	   unlocked main menu's bright collage too) */
-	glUniform4f(u_v_col, 0, 0, 0, 0.85f);
+	glUniform4f(u_v_col, 0, 0, 0, 0.85f * a);
 	for (int dy = -1; dy <= 1; dy++)
 		for (int dx = -1; dx <= 1; dx++)
 			if (dx || dy)
@@ -2116,16 +2698,58 @@ static void draw_version(int rw, int rh)
 				glDrawArrays(GL_TRIANGLES, 0, 3);
 			}
 	glViewport(x + 2 * sh, y - 2 * sh, w, h);
-	glUniform4f(u_v_col, 0, 0, 0, 0.6f);
+	glUniform4f(u_v_col, 0, 0, 0, 0.6f * a);
 	glDrawArrays(GL_TRIANGLES, 0, 3);
 	glViewport(x, y, w, h);
-	glUniform4f(u_v_col, 0.92f, 0.92f, 0.92f, 0.9f);
+	glUniform4f(u_v_col, 0.92f, 0.92f, 0.92f, 0.9f * a);
 	glDrawArrays(GL_TRIANGLES, 0, 3);
 	glViewport(0, 0, rw, rh);
 	glUseProgram(prog);
 	glBindVertexArray(vao);
 	glBindBuffer(GL_ARRAY_BUFFER, vbo);
 	glEnable(GL_DEPTH_TEST);
+}
+
+/* "ver. 1.0.1" in the main menu's lower right corner. A newer release (online.c's update check)
+   is added: "ver. 1.1.6 (1.1.7 is out)". */
+static void draw_version(int rw, int rh)
+{
+	static Label lb;
+	char text[48];
+	if (online_latest()[0])
+		snprintf(text, sizeof(text), "ver. %s (%s is out)", VOLDORIUM_VERSION, online_latest());
+	else
+		snprintf(text, sizeof(text), "ver. %s", VOLDORIUM_VERSION);
+	draw_label(&lb, text, rw, rh, 1, 1);
+}
+
+/* Esc quits only when pressed twice (issue #16): the first press shows "Press Esc again to quit"
+   at the bottom centre for ESC_MS; a second press within that time quits (or leaves an online
+   match). The game runs on meanwhile. EXIT GAME in the main menu and closing the window still
+   quit straight away. Wall-clock time: output only, never the game's state. */
+#define ESC_MS 2000
+static u32 esc_at;	/* SDL_GetTicks of the first press, 0: none */
+static int esc_confirmed(void)
+{
+	const u32 now = SDL_GetTicks();
+	if (esc_at && now - esc_at < ESC_MS)
+		return 1;
+	esc_at = now ? now : 1;
+	return 0;
+}
+static void draw_esc_prompt(int rw, int rh)
+{
+	static Label lb;
+	if (!esc_at)
+		return;
+	const u32 t = SDL_GetTicks() - esc_at;
+	if (t >= ESC_MS)
+	{
+		esc_at = 0;
+		return;
+	}
+	const float a = t < ESC_MS - 400 ? 1.0f : (float)(ESC_MS - t) / 400.0f;	/* fades out at the end */
+	draw_label(&lb, "Press Esc again to quit", rw, rh, 0, a);
 }
 /* M1_PERF=1: every 300 renders, the mean wall time per frame spent in the game (everything
    between two renders, pacing included unless M1_FAST) and in drawing, with the game mode */
@@ -2139,6 +2763,28 @@ static void perf_report(u64 t0, u64 t1, const TaCtx *c)
 	if (!on)
 		return;
 	const double f = 1000.0 / (double)SDL_GetPerformanceFrequency();
+	{
+		/* M1_PERF=slow (or with a number: the threshold in ms, default 12): also every frame
+		   whose game plus draw time is over it, with its texture decodes */
+		static double slow = -1;
+		static u64 last_dec;
+		if (slow < 0)
+		{
+			const char *e = getenv("M1_PERF");
+			slow = !strncmp(e, "slow", 4) ? (e[4] ? atof(e + 4) : 12.0) : 0;
+		}
+		u64 tex_decodes(void);
+		const double g = perf_prev ? (double)(t0 - perf_prev) * f : 0, d = (double)(t1 - t0) * f;
+		{
+			extern double tex_decode_ms;
+			if (slow > 0 && g + d > slow)
+				printf("perf slow: render %llu mode %u: game %.1f ms, draw %.1f ms, %u polygons, %llu texture decodes (%.1f ms)\n",
+					   (unsigned long long)rendered, rd32(0x8c24a584), g, d, c ? c->np : 0,
+					   (unsigned long long)(tex_decodes() - last_dec), tex_decode_ms);
+			tex_decode_ms = 0;
+		}
+		last_dec = tex_decodes();
+	}
 	if (perf_prev)
 		perf_game += (double)(t0 - perf_prev) * f;
 	perf_draw += (double)(t1 - t0) * f;
@@ -2220,10 +2866,19 @@ static void render_frame_draw(TaCtx *c)
 	glUniform2f(u_target, 640.0f, 480.0f);
 	int ww, wh;
 	SDL_GL_GetDrawableSize(win, &ww, &wh);
-	/* 16:9 picture centred in the window, drawn at the chosen resolution (native: the window's) */
-	int vw = ww, vh = ww * 9 / 16;
-	if (vh > wh) { vh = wh; vw = wh * 16 / 9; }
-	const int rw = res_w ? res_w : vw, rh = res_w ? res_h : vh;
+	/* the picture centred in the window, drawn at the chosen resolution; its shape is the
+	   resolution's (native: the window's), from 4:3 to 16:9 */
+	view_aspect = picture_aspect(res_w ? res_w : ww, res_w ? res_h : wh);
+	view_zoom = (16.0f / 9) / view_aspect;
+	glUniform1f(u_xzoom, view_zoom);
+	int vw = ww, vh = (int)(ww / view_aspect + 0.5f);
+	if (vh > wh) { vh = wh; vw = (int)(wh * view_aspect + 0.5f); }
+	int rw = res_w ? res_w : vw, rh = res_w ? res_h : vh;
+	if (!res_w && res_pct)	/* a share of native, upscaled with FSR into the window */
+	{
+		rw = vw * res_pct / 100, rh = vh * res_pct / 100;
+		rw = rw < 64 ? 64 : rw, rh = rh < 48 ? 48 : rh;
+	}
 	frame_target(rw, rh);
 	glBindFramebuffer(GL_FRAMEBUFFER, frame_fbo);
 	glViewport(0, 0, rw, rh);
@@ -2277,6 +2932,7 @@ static void render_frame_draw(TaCtx *c)
 	}
 	if (rd32(0x8c24a584) == 11)	/* game mode 11: the main menu */
 		draw_version(rw, rh);
+	draw_esc_prompt(rw, rh);
 	/* resolve the samples, then the screenshots read the finished picture */
 	glDisable(GL_SCISSOR_TEST);
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, frame_fbo);
@@ -2285,7 +2941,30 @@ static void render_frame_draw(TaCtx *c)
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, resolve_fbo);
 	for (int i = 0; i < nshots; i++)
 		if (shots[i] == rendered)
+		{
 			screenshot(rendered, rw, rh);
+			/* with each test screenshot: the frame's polygons by TSP fog mode (0 table, 1 per
+			   vertex, 2 none, 3 table mode 2) and the fog registers */
+			u32 n[4] = { 0 };
+			for (u32 k = 0; k < c->np; k++)
+				n[(c->p[k].tsp >> 22) & 3]++;
+			printf("fog: render %llu mode %u: table %u, vertex %u, none %u, table2 %u; FOG_COL_RAM %06x FOG_COL_VERT %06x "
+				   "FOG_DENSITY %04x table %04x %04x .. %04x\n", (unsigned long long)rendered, rd32(0x8c24a584), n[0], n[1], n[2], n[3],
+				   hw_reg(0x005f80b0) & 0xffffff, hw_reg(0x005f80b4) & 0xffffff, hw_reg(0x005f80b8) & 0xffff,
+				   hw_reg(0x005f8200) & 0xffff, hw_reg(0x005f8204) & 0xffff, hw_reg(0x005f83fc) & 0xffff);
+		}
+	{
+		static long long at = -2;	/* M1_SCREENSHOT_AT=n (tests): as F12 at render n */
+		if (at == -2)
+			at = getenv("M1_SCREENSHOT_AT") ? atoll(getenv("M1_SCREENSHOT_AT")) : -1;
+		if ((long long)rendered == at)
+			player_shot = 1;
+	}
+	if (player_shot)
+	{
+		player_shot = 0;
+		player_screenshot(rw, rh);
+	}
 	{
 		int art_frame(const TaCtx *c);
 		void art_shot(const u8 *rgb, int w, int h);
@@ -2298,13 +2977,44 @@ static void render_frame_draw(TaCtx *c)
 			free(px);
 		}
 	}
-	/* to the window, scaled to its 16:9 area */
+	/* to the window, scaled to the picture's area */
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 	glViewport(0, 0, ww, wh);
 	glClearColor(0, 0, 0, 1);
 	glClear(GL_COLOR_BUFFER_BIT);
 	const int x0 = (ww - vw) / 2, y0 = (wh - vh) / 2;
-	glBlitFramebuffer(0, 0, rw, rh, x0, y0, x0 + vw, y0 + vh, GL_COLOR_BUFFER_BIT, rw == vw && rh == vh ? GL_NEAREST : GL_LINEAR);
+	/* smaller than its area: FSR 1 (unless [video] upscale = linear); otherwise copied or scaled */
+	if (!(rw < vw && rh < vh && fsr_present(rw, rh, x0, y0, vw, vh)))
+	{
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, resolve_fbo);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+		glBlitFramebuffer(0, 0, rw, rh, x0, y0, x0 + vw, y0 + vh, GL_COLOR_BUFFER_BIT, rw == vw && rh == vh ? GL_NEAREST : GL_LINEAR);
+	}
+	{
+		/* M1_WINSHOT=n (tests): the window's picture at render n, after upscaling, as win_n.ppm */
+		static long long at = -2;
+		if (at == -2)
+			at = getenv("M1_WINSHOT") ? atoll(getenv("M1_WINSHOT")) : -1;
+		if ((long long)rendered == at)
+		{
+			u8 *px = malloc((size_t)ww * wh * 3);
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+			glPixelStorei(GL_PACK_ALIGNMENT, 1);
+			glReadPixels(0, 0, ww, wh, GL_RGB, GL_UNSIGNED_BYTE, px);
+			char name[64];
+			snprintf(name, sizeof(name), "win_%lld.ppm", at);
+			FILE *f = fopen(name, "wb");
+			if (f)
+			{
+				fprintf(f, "P6\n%d %d\n255\n", ww, wh);
+				for (int y = wh - 1; y >= 0; y--)
+					fwrite(px + (size_t)y * ww * 3, 1, (size_t)ww * 3, f);
+				fclose(f);
+			}
+			free(px);
+			printf("saved %s (%dx%d)\n", name, ww, wh);
+		}
+	}
 	glBindFramebuffer(GL_FRAMEBUFFER, frame_fbo);
 	SDL_GL_SwapWindow(win);
 	{

@@ -6,13 +6,40 @@ A native Windows and Linux port of the Dreamcast fighting game **SoulCalibur** (
 made by static recompilation: the game's SH-4 machine code is translated into C and compiled
 together with a small native runtime that stands in for the Dreamcast hardware. It adds:
 
-- 16:9 widescreen (3D scene widened; HUD, menus and text kept at their true proportions)
-- any resolution, full screen at the desktop's native resolution, multisample anti-aliasing
-- **Online Versus** in the game's own main menu: a worldwide lobby with matchmaking, ping,
-  accept/decline, NAT hole punching with a relay fallback, and GGPO rollback netcode
-- a built-in virtual memory card, an in-game GRAPHICS menu, optional 16:9 replacement artwork,
-  and new high resolution art for the hit level labels in Practice (`port/m1/textures`, drawn by
-  `tools/hitlabels.py`)
+**Picture**
+- **Widescreen**: 16:9, or your screen's own shape down to 4:3 (16:10 monitors, the Steam Deck).
+  The 3D scene is widened, while the HUD, menus and text keep their true proportions.
+- **Fight HUD placement**: kept in the 4:3 middle (the default) or spread to the screen's edges.
+- **4:3 menu and loading pictures** in widescreen: stretched, with blurred sides, with black
+  sides, or replaced by optional 16:9 artwork.
+- **Any resolution**: full screen at the desktop's native resolution, or any fixed size.
+- **AMD FSR 1 upscaling**: ULTRA QUALITY, QUALITY, BALANCED and PERFORMANCE presets draw below
+  native and upscale with sharp edges, for slower PCs and handhelds.
+- **Multisample anti-aliasing and VSync** (no tearing).
+- **Smooth text**: menu and HUD text drawn from upscaled copies of the game's font.
+- New high resolution art for the hit level labels in Practice (`port/m1/textures`, drawn by
+  `tools/hitlabels.py`).
+- **F12 takes a screenshot** (PNG at the full drawing size).
+
+**Online**
+- **Online Versus** in the game's own main menu: a worldwide lobby with matchmaking, ping and
+  accept/decline.
+- **GGPO rollback netcode**, with NAT hole punching and a relay server as fallback.
+- **Windows and Linux players meet in the same lobby**, the full roster unlocked in every match.
+- **Update notice**: the main menu tells you when a newer version is out.
+
+**Play**
+- **Fast loading** (or the original loading times, if you prefer).
+- A built-in virtual memory card: progress and unlocks are saved.
+- **Keyboard and controllers** (Xbox layout, the Steam Deck's controls): a second controller is
+  player 2 for VS BATTLE; keyboard keys can be remapped in `voldorium.ini`.
+- **Customizable bumpers and triggers**: set what LB, RB, LT and RT press in `[pad]` in
+  `voldorium.ini`, any Dreamcast button or several at once (`lt = a+b`).
+- **GRAPHICS menu in the game** (two pages) for every picture setting; everything else in a
+  documented `voldorium.ini`.
+- **Native Windows and Linux versions**: no emulator. The game module is built once on your own
+  PC from your own disc.
+- Safe quitting: **EXIT GAME** in the main menu, or **Esc** pressed twice.
 
 What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
@@ -55,6 +82,34 @@ trademark of Bandai Namco Entertainment Inc.; Dreamcast is a trademark of Sega C
 Not in the repository, by design (see `.gitignore`): `disc/` (your dump), `extracted/`, anything
 generated from them (`port/build/`), Ghidra projects, traces, and `port/art16x9/refs.txt`.
 
+## System requirements
+
+SoulCalibur is an old game, but Voldorium is not an emulator for old machines. It recompiles the
+whole game to run natively, draws it at modern resolutions in widescreen with anti-aliasing and
+FSR upscaling, runs rollback netcode online, and builds the game module from your disc on your
+own PC. It is made and tested for current desktop PCs.
+
+**Required** (it will not start without these):
+- A 64-bit (x86-64) CPU, with Windows 10 or 11 (64-bit), or Linux with glibc 2.28 or newer
+- A graphics card and driver with **OpenGL 3.3**
+- About 1 GB of free disk space for the first start
+
+**Supported and tested:**
+- Desktop PCs with a current CPU and a **dedicated graphics card** from NVIDIA or AMD, with up to
+  date drivers. Development and testing are done on a Ryzen 7 7700 with a GeForce RTX 4060.
+- The **Steam Deck on SteamOS**, with the Linux version (see [Steam Deck](#steam-deck)).
+
+**Not supported:**
+- **Older PCs and laptops**, and **integrated graphics** (graphics built into the CPU, as in
+  most laptops and office PCs), apart from the Steam Deck on SteamOS
+- Windows installed on the Steam Deck
+- 32-bit systems, Windows 7 and 8, and macOS
+
+Some of these machines may run the game, but they are not tested and we can't fix problems that
+only happen on them. If the game runs in slow motion, with stretched or crackling sound, the PC
+can't keep up with 60 frames per second. A lower resolution or an FSR preset in GRAPHICS can help
+when the graphics card is what holds it back, but not a slow CPU.
+
 ## Installing
 
 You need Windows 10 or 11, your own disc dump of SoulCalibur (USA, T-1401N, V1.000) as a
@@ -85,6 +140,15 @@ between any two players of that version.
 
 To uninstall, delete the folder. Your settings and memory card are in it (`voldorium.ini`,
 `vmu_a1.bin`): keep those two files to carry them over to a new version.
+
+From 1.1.6 on, the game says when a newer version is out: the main menu's corner reads
+`ver. 1.1.6 (1.1.7 is out)`, and ONLINE VERSUS and GRAPHICS > MORE SETTINGS get a green
+**UPDATE TO 1.1.7** line that opens the release page in your browser (the line is in ONLINE
+VERSUS and green from 1.1.7 on). Nothing is downloaded or installed for you. The game
+asks the lobby server once per start, sending only its version number; `[game] update_check = 0`
+turns it off. Older versions see an entry named UPDATE NOW at the top of the Online Versus
+player list instead. To hear about each release by email, use **Watch > Custom > Releases** on
+this repository.
 
 ### Linux
 
@@ -194,13 +258,39 @@ resolution; the main menu's **GRAPHICS** entry changes resolution, full screen,
 anti-aliasing, VSync and where the fight HUD sits (as in the original 4:3 game by default,
 halfway out, or at the screen's edges); its second page, **MORE SETTINGS**, has loading speed
 (original or fast), how 4:3 menu pictures fill 16:9, sharp or smooth text, and the sound volume.
+**F12** saves a screenshot (PNG, in the `screenshots` folder next to the game; Xbox Game Bar
+cannot capture the game's window). **EXIT GAME**, the last main menu entry, quits straight away. **Esc** quits too, when pressed
+twice: the first press shows "Press Esc again to quit" for two seconds.
 Controllers and keyboard go through SDL2.
+
+**Controls.** Keyboard: arrow keys = D-pad, Z X A S = the Dreamcast's A B X Y, Q / W = L / R,
+Enter = Start (`[keys]` in `voldorium.ini`). A controller (Xbox layout) plays with its face
+buttons, D-pad or left stick and Start; its shoulder buttons and triggers press L and R. Each of
+LB, RB, LT and RT can press other Dreamcast buttons instead, or several at once, set in
+`voldorium.ini` while the game is closed:
+
+```ini
+[pad]
+lb = l
+rb = r
+lt = a+b
+rt = b+y
+```
+
+Button names are `a b x y l r start`, joined with `+`. What each Dreamcast button does in a fight
+is set by the game's own Button Config (OPTIONS). A second controller is player 2 for VS BATTLE.
+Combinations are ordinary inputs, so they work online too.
 
 **Online Versus** is on the main menu. It lists players around the world (and on your local
 network) who are searching with the same build. Pick one to challenge; the other player sees
 your ping and accepts or declines. Players are shown as OPPONENT unless they set a nickname
 (`[net] name = ...` in `voldorium.ini`); computer names are never sent. Both players must have
 built from the same sources: the lobby only matches identical builds.
+
+Online matches run without your memory card, so both players run exactly the same game. Instead,
+both players get **everything unlocked** from the start, whatever their own saves hold: every
+character (two full rows at character select), stage, costume and extra mode. Nothing from an
+online match is saved to your card.
 
 ### Settings (`voldorium.ini`)
 
@@ -214,17 +304,20 @@ closed.
 | | `font` | file | | The Dreamcast system font (optional, `biosfont.bin`). |
 | | `loading` | `original`, `fast` | ✓ | Disc reads at the Dreamcast drive's speed, or instant. Online is always `original`. |
 | | `vmu` | file | | The memory card (default `vmu_a1.bin` next to the game). |
+| | `update_check` | `1`, `0` | | Asks the lobby server for a newer version at the main menu (sends only the version). |
 | `[video]` | `fullscreen` | `1`, `0` | ✓ | Full screen or a window (also Alt+Enter / F11). |
-| | `resolution` | `native`, `1920x1080`... | ✓ | The size the game is drawn at: your monitor's, or a 16:9 size. |
+| | `resolution` | `native`, `77%`, `67%`, `59%`, `50%`, `1920x1080`, `1920x1200`... | ✓ | The size the game is drawn at, and its shape: your monitor's (from 4:3 to 16:9; wider screens get side bars), a share of it that AMD FSR 1 sharpens back up to full size (for slower PCs), or a 16:9, 16:10 or 4:3 size. |
+| | `upscale` | `fsr`, `linear` | | How a picture drawn smaller than the screen is enlarged: AMD FSR 1 (default) or plain bilinear. |
 | | `window` | `1280x720`... | | The window's size when not full screen. |
 | | `msaa` | `0`, `2`, `4`, `8` | ✓ | Anti-aliasing. |
 | | `vsync` | `1`, `0` | ✓ | On: no tearing. Off: lowest input delay. |
 | | `hud` | `4:3`, `middle`, `edges` | ✓ | Where the fight HUD sits in 16:9. Only your own screen, also online. |
-| | `backgrounds` | `stretch`, `blur`, `replace` | ✓ | How 4:3 menu and loading pictures fill 16:9 (`replace`: 16:9 art from the `art16x9` folder). |
+| | `backgrounds` | `stretch`, `blur`, `black`, `replace` | ✓ | How 4:3 menu and loading pictures fill 16:9 (`replace`: 16:9 art from the `art16x9` folder). The Mission Battle map and Art Gallery pictures are never stretched: `stretch` gives them blurred sides. |
 | | `text` | `smooth`, `sharp` | ✓ | Menu and HUD text upscaled with smooth edges, or the original pixels. |
 | `[audio]` | `enabled` | `1`, `0` | | `0`: no sound at all. |
 | | `volume` | `0` to `200` | ✓ | Sound volume in percent (the menu steps 0, 25, 50, 75, 100). |
 | `[keys]` | `up down left right a b x y start l r` | SDL key names | | Keyboard controls (`Up`, `Z`, `Return`...). |
+| `[pad]` | `lb rb lt rt` | `l`, `r`, `a+b`... | | What a controller's shoulder buttons and triggers press: Dreamcast buttons (`a b x y l r start`), `+` for several at once. Default: L and R. |
 | `[net]` | `name` | text | | Your nickname in the Online Versus lobby (empty: OPPONENT). |
 | | `port` | `7000` | | UDP port for online play. |
 | | `delay` | frames, `2` | | Fight input delay online; rollback covers the rest. |
@@ -236,8 +329,13 @@ More detail is in `port/README.md` and in the README.txt of the player folder.
 
 ## Steam Deck
 
-Either version runs on the Deck; neither is tested on a real Deck yet, so reports are welcome.
+**We recommend SteamOS with the Linux version on the Deck:** it performs best there.
 Online Versus matches Deck, Linux and Windows players of the same version.
+
+**Windows installed on the Deck is not supported.** Voldorium draws with OpenGL, and the
+Deck's Windows graphics driver adds a large fixed cost to every OpenGL frame, so fights stutter
+whatever the settings. If your Deck runs Windows, use SteamOS (for example as dual boot) to play
+Voldorium.
 
 - **Linux (native):** copy the unpacked Linux download and your disc dump (the `.gdi` and its
   track files) to the Deck. In Desktop Mode, start `voldorium` once: it asks for the dump and
@@ -249,8 +347,9 @@ Online Versus matches Deck, Linux and Windows players of the same version.
   under Wine 10 (boot, menus, fights, and a lobby match against a Windows PC).
 
 The Deck's controls work as a controller (Steam Input). Its 1280x800 screen shows the game in
-16:9 with thin bars above and below: the game's picture is 16:9 on every screen, so that online
-players see the same game. The defaults (full screen, VSync on) suit the Deck's 60 Hz screen.
+16:10 at the native resolution: the picture takes the screen's shape (from 4:3 to 16:9) by
+showing a little less at the sides. The game itself is the same 16:9 game on every screen, so
+online players still meet whatever their screens. The defaults (full screen, VSync on) suit the Deck's 60 Hz screen.
 
 ## Hosting a lobby server
 
@@ -271,6 +370,8 @@ The project's own code is provided for personal, non-commercial use with a legal
 of the game. Third-party parts keep their own licenses:
 
 - GGPO: MIT (`third_party/ggpo/LICENSE`)
+- AMD FidelityFX Super Resolution 1 (FSR 1): MIT, ported to GLSL in `port/m1/render.c` (the
+  licence text is with it)
 - SDL2: zlib (linked at build time, shipped as `SDL2.dll`; on Linux the system's own)
 - Zig (MIT): the Linux builder downloads it at first start; it is not shipped
 - Flycast: GPL-2.0. Its sine table header (the SH-4 FSCA results, measured on the hardware)
