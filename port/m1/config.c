@@ -4,8 +4,9 @@
  *   [game]  disc = path of the .gdi        font = BIOS font file (optional)
  *           loading = original (disc reads take the Dreamcast drive's time) / fast (instant)
  *           vmu = memory card file (default vmu_a1.bin next to the executable; none in netplay)
- *   [video] fullscreen = 0/1 (player form default 1)  resolution = native or WxH (16:9; the
- *           picture is drawn at that size)  window = 1280x720 (window size when native)
+ *   [video] fullscreen = 0/1 (player form default 1)  resolution = native, 77%/67%/59%/50% of
+ *           native (FSR 1 upscaling) or WxH (the picture is drawn at that size)  upscale = fsr/linear
+ *           window = 1280x720 (window size when native)
  *           msaa = 0/2/4/8 (anti-aliasing), vsync = 1/0, text = smooth/sharp
  *           backgrounds = stretch / blur / replace (4:3 menu and loading pictures in 16:9)
  *   [audio] enabled = 0/1  volume = 0-200 (percent)
@@ -70,6 +71,14 @@ static void find_exe_dir(void)
 		*slash = 0;
 	else
 		strcpy(exe_dir, ".");
+}
+
+/* the folder of the executable (screenshots go there, render.c) */
+const char *config_exe_dir(void)
+{
+	if (!exe_dir[0])
+		find_exe_dir();
+	return exe_dir;
 }
 
 const char *config_get(const char *section, const char *key)
@@ -156,17 +165,20 @@ static const char *const ini_notes[][3] = {
 	{ "game", "font", "the Dreamcast system font file (optional)" },
 	{ "game", "loading", "original (as fast as the Dreamcast's drive) or fast (instant); online: always original" },
 	{ "game", "vmu", "the memory card file (default: vmu_a1.bin next to the game)" },
+	{ "game", "update_check", "1: ask the lobby server for a newer version at the main menu (sends only the version), 0: never" },
 	{ "video", "fullscreen", "1 full screen, 0 a window (Alt+Enter or F11 switch while playing)" },
-	{ "video", "resolution", "native (your monitor's) or a 16:9 size such as 1920x1080: the size the game is drawn at" },
+	{ "video", "resolution", "native (your monitor's), 77%, 67%, 59% or 50% of native (drawn smaller, sharpened back up with AMD FSR 1), or a size such as 1920x1080: the size the game is drawn at" },
+	{ "video", "upscale", "fsr (AMD FSR 1, the default) or linear (plain): how a picture drawn smaller than the screen is enlarged" },
 	{ "video", "window", "the window's size when not full screen" },
 	{ "video", "msaa", "anti-aliasing: 0 (off), 2, 4 or 8" },
-	{ "video", "backgrounds", "4:3 menu and loading pictures: stretch, blur (blurred sides) or replace (art16x9 folder)" },
+	{ "video", "backgrounds", "4:3 menu and loading pictures: stretch, blur (blurred sides), black (black sides) or replace (art16x9 folder)" },
 	{ "video", "hud", "fight HUD: 4:3 (as in the original), middle (halfway out) or edges (screen sides)" },
 	{ "video", "text", "menu and HUD text: smooth (upscaled) or sharp (the original pixels)" },
 	{ "video", "vsync", "1 on (no tearing), 0 off (lowest input delay)" },
 	{ "audio", "enabled", "0: no sound at all (the game starts without an audio device)" },
 	{ "audio", "volume", "sound volume in percent, 0 to 200" },
 	{ "keys", "", "keyboard: SDL key names (Up, Z, Return, Left Shift...). a b x y = the Dreamcast buttons, l r = triggers" },
+	{ "pad", "", "controller shoulder buttons (lb rb) and triggers (lt rt): Dreamcast buttons a b x y l r start, joined with + for several at once (a+b)" },
 	{ "net", "port", "UDP port for online play (the lobby and manual connections)" },
 	{ "net", "peer", "manual connection only: the other player's address:port" },
 	{ "net", "player", "manual connection only: 1 or 2" },
@@ -192,7 +204,7 @@ void config_save(void)
 		return;
 	fprintf(f, "; Voldorium settings (README.txt has more). Most of them are also in the game: GRAPHICS\n"
 			   "; in the main menu. A line starting with ; is a note; changes here apply at the next start.\n");
-	static const char *order[] = { "game", "video", "audio", "keys", "net", "debug" };
+	static const char *order[] = { "game", "video", "audio", "keys", "pad", "net", "debug" };
 	for (unsigned s = 0; s < sizeof(order) / sizeof(order[0]); s++)
 	{
 		int any = 0;
@@ -248,6 +260,7 @@ static void apply_settings(void)
 		env_default("M1_FULLSCREEN", "1");
 	env_default("M1_WINDOW", config_get("video", "window"));
 	env_default("M1_RESOLUTION", config_get("video", "resolution"));
+	env_default("M1_UPSCALE", config_get("video", "upscale"));	/* fsr or linear (render.c) */
 	env_default("M1_BGMODE", config_get("video", "backgrounds"));
 	env_default("M1_HUD", config_get("video", "hud"));	/* edges, middle or 4:3 (render.c) */
 	env_default("M1_ARTDUMP", config_get("debug", "artdump"));
@@ -372,13 +385,21 @@ static long load_boot_files(void)
 
 /* ---- startup ---------------------------------------------------------------------------- */
 #if defined(__PROSPERO__)
+#include "sc1_disc_paths.h"
+static int sc1_probe_file(const char *path, void *unused)
+{
+	(void)unused;
+	FILE *file = fopen(path, "rb");
+	if (!file)
+		return errno;
+	fclose(file);
+	return 0;
+}
 static int pick_disc(void)
 {
-	const char *disc = "/app0/Soulcalibur (USA).gdi";
-	FILE *file = fopen(disc, "rb");
-	if (!file)
-		m1_fatal("Cannot open the default PS5 disc: %s", disc);
-	fclose(file);
+	char disc[256], error[512];
+	if (!sc1_choose_disc(sc1_probe_file, NULL, disc, sizeof(disc), error, sizeof(error)))
+		m1_fatal("No readable Soulcalibur (USA).gdi. Tried /app0, /data/PPSA99841 and /mnt/usb0-7/homebrew/PPSA99841. %s", error);
 	config_set("game", "disc", disc);
 	return 1;
 }

@@ -115,7 +115,7 @@ void m1_stop(const char *why)
 	hw_report();
 #ifdef _WIN32
 	/* player form: tell the player why the game stopped, unless they quit themselves */
-	if (!m1_verbose && strcmp(why, "window closed") && strcmp(why, "quit (Esc)"))
+	if (!m1_verbose && strcmp(why, "window closed") && strncmp(why, "quit (", 6))	/* quit (Esc), quit (EXIT GAME) */
 		MessageBoxA(0, why, "Voldorium", MB_ICONINFORMATION);
 #endif
 	exit(0);
@@ -416,6 +416,75 @@ THREAD_FN(hang_thread)
 	return THREAD_RET;
 }
 
+/* One copy at a time (player form). A second start (a double click counted twice, say) would
+   play the intro behind the running game and truncate its log, so it brings the running window
+   to the front (Windows) and quits before anything else. The restarts into and out of a lobby
+   match (--join, --back; online.c relaunch) start while the old copy is still exiting: they
+   wait for it, up to 15 s, and then go on regardless (a match never fails over this). Off in
+   the development form, with --seconds (tests) and with M1_MULTI=1. */
+#if !defined(__PROSPERO__)
+#ifdef _WIN32
+static BOOL CALLBACK raise_running(HWND w, LPARAM arg)
+{
+	(void)arg;
+	char t[64];
+	DWORD pid = 0;
+	GetWindowThreadProcessId(w, &pid);
+	if (pid == GetCurrentProcessId() || !IsWindowVisible(w) || !GetWindowTextA(w, t, sizeof(t))
+		|| strncmp(t, "Voldorium ver. ", 15))
+		return TRUE;
+	if (IsIconic(w))
+		ShowWindow(w, SW_RESTORE);
+	SetForegroundWindow(w);
+	return FALSE;
+}
+#else
+#include <fcntl.h>
+#include <sys/file.h>
+#endif
+static void single_copy(int argc, char **argv)
+{
+	if ((argc >= 2 && argv[1][0] != '-') || getenv("M1_MULTI"))
+		return;
+	int wait = 0;
+	for (int i = 1; i < argc; i++)
+	{
+		if (!strcmp(argv[i], "--seconds"))
+			return;
+		if (!strcmp(argv[i], "--join") || !strcmp(argv[i], "--host") || !strcmp(argv[i], "--back"))
+			wait = 1;
+	}
+#ifdef _WIN32
+	/* held until this process ends; then the next waiter gets it (WAIT_ABANDONED) */
+	const HANDLE m = CreateMutexA(0, FALSE, "Local\\Voldorium.one_copy");
+	if (!m)
+		return;
+	const DWORD r = WaitForSingleObject(m, wait ? 15000 : 0);
+	if (r == WAIT_OBJECT_0 || r == WAIT_ABANDONED || wait)
+		return;
+	EnumWindows(raise_running, 0);
+	ExitProcess(0);
+#else
+	/* a lock file per user; O_CLOEXEC: a restarted copy must not inherit the old copy's lock */
+	char path[512];
+	const char *dir = getenv("XDG_RUNTIME_DIR");
+	snprintf(path, sizeof(path), "%s/voldorium-%u.lock", dir && *dir ? dir : "/tmp", (unsigned)getuid());
+	const int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+	if (fd < 0)
+		return;
+	for (int tries = wait ? 150 : 1; tries > 0; tries--)
+	{
+		if (flock(fd, LOCK_EX | LOCK_NB) == 0)
+			return;	/* fd stays open: the lock lasts until this process ends */
+		if (tries > 1)
+			usleep(100000);
+	}
+	if (wait)
+		return;
+	_exit(0);
+#endif
+}
+#endif /* !__PROSPERO__ */
 
 static int m1_main(int argc, char **argv);
 #ifdef _WIN32
@@ -485,6 +554,11 @@ static int m1_main(int argc, char **argv)
 {
 #if defined(__PROSPERO__)
 	ps5_start_log();
+#else
+	single_copy(argc, argv);	/* before the log: a second copy must not truncate the running one's */
+#endif
+#if defined(__PROSPERO__)
+	/* The PS5 logger was initialized above. */
 #elif defined(_WIN32)
 	const HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
 	if (!out || out == INVALID_HANDLE_VALUE || GetFileType(out) == FILE_TYPE_UNKNOWN)

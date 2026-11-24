@@ -2,6 +2,127 @@
 
 All builds need your own legal disc dump of SoulCalibur (USA, T-1401N, V1.000); see the README.
 
+## 1.2.1 (2026-11-17)
+
+### Changed
+- **Art Gallery pictures are never stretched**: with BACKGROUNDS STRETCH (the default), the
+  gallery's artwork is now shown at its true shape with blurred sides, like BACKGROUNDS BLUR, also
+  with its caption open and while changing pictures. The gallery's menus still stretch.
+
+### Fixed
+- **Mission Battle map sides** (enrique363/voldorium#17): once more than one region is open, the
+  map draws a margin of map pieces beyond the 4:3 screen, for its scrolling. That margin was taken
+  for a repeating wallpaper, so the sides showed loose pieces of the wrong part of the map and a
+  black corner, jumping as the map changed region. The margin is now left out, and the sides
+  follow the background setting (blurred, black...) as on the rest of the map.
+
+## 1.2.0 (2026-11-15)
+
+### Added
+- **FSR 1 upscaling** (from enrique363/voldorium#13): four new resolution choices draw the game at
+  77%, 67%, 59% or 50% of your screen's resolution and enlarge it with AMD FidelityFX Super
+  Resolution 1, which keeps edges sharp, for slower PCs and handhelds. The resolution line in
+  GRAPHICS now goes NATIVE, FSR ULTRA QUALITY, QUALITY, BALANCED, PERFORMANCE, then the fixed
+  sizes (the help line shows the size it draws at); in `[video]`, `resolution = 67%`.
+  A fixed size smaller than the screen is enlarged with FSR too; `upscale = linear` keeps the
+  plain enlargement of earlier versions.
+- **BACKGROUNDS BLACK** (enrique363/voldorium#15): a fourth choice for 4:3 menu and loading
+  pictures in widescreen, next to stretch, blur and replace: plain black sides, as on a 16:9 TV.
+  In GRAPHICS, or `backgrounds = black` in `[video]`.
+
+### Changed
+- **Esc quits when pressed twice** (enrique363/voldorium#16): the first press shows "Press Esc
+  again to quit" at the bottom of the screen for two seconds, without pausing the game, so a
+  stray key press no longer ends the game (or an online match). EXIT GAME in the main menu still
+  quits straight away.
+
+### Fixed
+- **One copy at a time**: starting Voldorium while it is already running (a double click counted
+  twice, say) brings the running game to the front instead of starting a second copy, which
+  played the intro and its music behind the menu and showed it after EXIT GAME. The restarts
+  into and out of an Online Versus match are not affected.
+- **Reverb** (enrique363/voldorium#14): the sound chip's effects processor read its delay
+  and work memory from the wrong places, so the reverb on the Art Gallery music, the intro and
+  wherever else the game uses it did not sound like the music's echo. It now matches the emulator
+  Flycast's.
+
+## 1.1.10 (2026-11-14)
+
+### Fixed
+- **EXIT GAME** quits straight away, like Esc, instead of first showing a small Windows message box.
+
+## 1.1.9 (2026-11-14)
+
+### Added
+- **EXIT GAME in the main menu** (enrique363/voldorium#11): quits Voldorium, also with a
+  controller (Esc was the only way before).
+
+### Fixed
+- **Fog table** (enrique363/voldorium#11): the PowerVR's table fog (distance fog that fades
+  into a colour) is drawn now. The Water Labyrinth's far cave fades into darkness instead of
+  showing pieces that pop in and out, and the character select's light tunnel fades softly into
+  its bright band instead of ending in hard edges.
+- **Stage select in widescreen** (enrique363/voldorium#11): the stage tiles and the chosen
+  stage's plate are drawn at 4:3 proportions with their panel, so they sit inside it with their
+  NEW labels, on every screen shape.
+- **Animated textures** (enrique363/voldorium#11): textures the game changes every frame (palette
+  cycling, such as the five in Inferno's defeat) get new contents in place instead of new
+  storage each time, which some graphics drivers had to wait for. Reported as a frame drop in
+  Inferno's defeat; on the test PC that scene was already well within a frame.
+- **Ending credits with BLUR backgrounds** (enrique363/voldorium#11): when the credits shrink
+  the ending picture into a frame, the sides stay black instead of showing dark bars and seams;
+  4:3 pictures that fill the screen keep their blurred or stretched sides.
+
+## 1.1.8 (2026-11-13)
+
+### Added
+- **16:10 and other screen shapes** (enrique363/voldorium#10): the picture takes the shape of the
+  resolution, from 4:3 to 16:9. NATIVE follows your screen, so a 16:10 monitor or the Steam
+  Deck is filled instead of showing bars above and below; GRAPHICS also offers 16:10 sizes
+  (1280x800, 1680x1050, 1920x1200, 2560x1600...) and 4:3 sizes (1024x768, 1440x1080, 1600x1200...;
+  4:3 shows the game as framed on the Dreamcast). A narrower picture shows a little less at the
+  sides; the HUD placements (EDGES, MIDDLE, 4:3) follow its edges (at 4:3 all three are the
+  original HUD). The game itself stays the 16:9 game, so players with different screens still
+  meet online.
+- **Shoulder buttons and triggers** (enrique363/voldorium#10): `[pad] lb rb lt rt` in
+  `voldorium.ini` set what each presses: a Dreamcast button or several at once (`lt = a+b`).
+  They no longer have to repeat L and R.
+- **F12 takes a screenshot** (enrique363/voldorium#10): a PNG of the picture at the drawing
+  resolution, in a `screenshots` folder next to the game. Xbox Game Bar shows its overlay but
+  captures nothing from the game's OpenGL window.
+
+### Fixed
+- **Unlock announcements** (enrique363/voldorium#10): the CONGRATULATIONS! screens that show a new
+  character, stage, costume or mode (after an Arcade clear, for example) ran 8 times too fast
+  and their fanfare came out in fragments. They shared their game mode with the memory card save
+  that follows, which Voldorium speeds up; now only the save is sped up, and the announcements
+  run and sound as on the Dreamcast, with either LOADING setting.
+- **Online Versus has the full roster**: online matches run without a memory card (both players
+  must run the same game), so character select had only the starting characters, one row. Both
+  players now get every character, stage, costume and extra mode unlocked in online matches, the
+  same on both sides and never from either player's card.
+
+## 1.1.7 (2026-11-09)
+
+### Changed
+- **The update notice's UPDATE TO line is green** (the main menu's green, as on ONLINE
+  VERSUS), and it is also in the ONLINE VERSUS lobby, below the players. Selecting it opens the
+  release page.
+
+## 1.1.6 (2026-11-09)
+
+### Added
+- **Update notice**: at the main menu the game asks the lobby server once whether a newer version
+  is out, sending only its version number. When one is, the corner reads `ver. 1.1.6 (1.1.7 is
+  out)`, the ONLINE VERSUS and GRAPHICS help lines mention it, and GRAPHICS > MORE SETTINGS gets
+  UPDATE TO x.y.z, which opens the release page in the browser (a full screen game is minimized
+  first). Nothing is downloaded or installed. No answer, no notice; nothing waits for it.
+  `[game] update_check = 0` turns it off, and so does `[net] lobby = none`.
+- **Lobby server**: answers the update check with the newest GitHub release, and shows players of
+  1.1.5 and earlier an entry named UPDATE NOW at the top of their Online Versus player list
+  while a newer release exists (a challenge to it is declined; older versions can show nothing
+  but a player's name there).
+
 ## 1.1.5 (2026-11-08)
 
 ### Added
